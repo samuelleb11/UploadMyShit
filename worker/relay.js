@@ -95,7 +95,11 @@ export class Relay {
 
   webSocketMessage(ws, message) {
     const [role] = this.ctx.getTags(ws);
-    this.#open(role === 'a' ? 'b' : 'a')?.send(message);
+    const peer = this.#open(role === 'a' ? 'b' : 'a');
+    if (peer) peer.send(message);
+    // Nobody to hand it to: close rather than swallow it, so the sender sees the lane is
+    // gone instead of pouring data into it.
+    else ws.close(1011, 'the other device is not connected');
   }
 
   webSocketClose(ws, code, reason) {

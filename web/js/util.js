@@ -2,6 +2,7 @@
 
 export function formatBytes(n) {
   if (!Number.isFinite(n) || n < 0) return '–';
+  if (n < 1) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0;
   while (n >= 1000 && i < units.length - 1) {
@@ -12,12 +13,13 @@ export function formatBytes(n) {
 }
 
 export function formatRate(bytesPerSecond) {
-  if (!bytesPerSecond) return '–';
+  if (!(bytesPerSecond >= 1)) return '–';
   return `${formatBytes(bytesPerSecond)}/s`;
 }
 
 export function formatDuration(seconds) {
-  if (!Number.isFinite(seconds) || seconds < 0) return '–';
+  // Past 100 hours an estimate says nothing.
+  if (!Number.isFinite(seconds) || seconds < 0 || seconds >= 360_000) return '–';
   if (seconds < 1) return '<1s';
   const s = Math.round(seconds);
   if (s < 60) return `${s}s`;

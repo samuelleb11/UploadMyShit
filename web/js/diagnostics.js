@@ -223,6 +223,25 @@ export function initDiagnostics(ctx, onSetting) {
         c.lanes.map((l) => `${l.lane} ${l.kind}${l.ready ? '' : ' (not ready)'}: ${formatRate(l.rate)}, ${formatBytes(l.queued)} queued`).join('\n') || '–',
       ]);
       rows.push(['Chunk size', formatBytes(c.chunk)]);
+      for (const t of c.transfers ?? []) {
+        if (t.direction === 'out') {
+          rows.push([
+            'Sending now',
+            `${t.state}, pass ${t.pass}: ${formatBytes(t.inflight)} in flight of a ${formatBytes(t.window)} window, ` +
+              `acknowledged ${t.sinceAckMs} ms ago\n` +
+              Object.entries(t.lanes)
+                .map(([lid, l]) => `${lid}${l.open ? '' : ' (closed)'}: ${formatBytes(l.sent)} sent, ${formatBytes(l.acked)} acknowledged`)
+                .join('\n'),
+          ]);
+        } else {
+          rows.push([
+            'Receiving now',
+            `${t.state}: ${formatBytes(t.received)} received, ${formatBytes(t.written)} written` +
+              `${t.chunksMissing ? `, ${t.chunksMissing} chunks to come` : ''}` +
+              `${t.waitingForPass ? `, checking pass ${t.waitingForPass.pass}` : ''}`,
+          ]);
+        }
+      }
       parts.push(section(`Connection: ${c.device}`, rows));
     }
     if (r.transfers.length) {

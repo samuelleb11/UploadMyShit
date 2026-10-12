@@ -39,6 +39,12 @@ const TUNE_EVERY = 2000;
 /** A connection is added only for work that will last a while yet. */
 const SCALE_MIN_REMAINING = 64 << 20;
 const STALL_MS = 45_000;
+/**
+ * A lane holding data the receiver has not acknowledged for this long is dead, even if it
+ * still looks open: a relay whose other end vanished without a clean close swallows what
+ * it is given, and would hold the credit window forever.
+ */
+const LANE_DEAD_MS = 8_000;
 
 const TERMINAL = new Set(['done', 'declined', 'cancelled', 'failed']);
 
@@ -86,7 +92,7 @@ class Base extends Emitter {
 
   get eta() {
     const left = this.total - this.written;
-    return this.speed > 0 && left > 0 ? left / this.speed : null;
+    return this.speed >= 1024 && left > 0 ? left / this.speed : null;
   }
 
   _startSpeed(get) {
@@ -97,6 +103,8 @@ class Base extends Emitter {
       const v = get();
       const inst = ((v - last) / (now - at)) * 1000;
       this.speed = this.speed ? this.speed * 0.6 + inst * 0.4 : inst;
+      // A stall decays the average forever without reaching zero: call it zero.
+      if (this.speed < 1) this.speed = 0;
       last = v;
       at = now;
       this.emit('change');
@@ -106,6 +114,7 @@ class Base extends Emitter {
   _stopTimers() {
     clearInterval(this.speedTimer);
     clearInterval(this.tuneTimer);
+    clearInterval(this.laneTimer);
     clearInterval(this.ackTimer);
   }
 }
@@ -247,6 +256,8 @@ export class OutgoingTransfer extends Base {
     this.written = 0;
     this.lastProgress = performance.now();
     this.waits = { window: 0, lane: 0, read: 0, limit: 0 };
+    /** When each lane's acknowledged count last moved (or it was last caught up). */
+    this.ackMoved = {};
     /** The same, never reset: where the time went, for diagnostics. */
     this.waitTotals = { window: 0, lane: 0, read: 0, limit: 0 };
     this.ackWaiters = [];
@@ -287,6 +298,7 @@ export class OutgoingTransfer extends Base {
     this.tuneAt = performance.now();
     this.tuneRecv = 0;
     this.tuneTimer = setInterval(() => this.#tune(), TUNE_EVERY);
+    this.laneTimer = setInterval(() => this.#checkLanes(), 1000);
     this.#tune();
     try {
       await this.#pump();
@@ -353,6 +365,7 @@ export class OutgoingTransfer extends Base {
         continue;
       }
       this.sentByLane.set(lane.lid, (this.sentByLane.get(lane.lid) || 0) + item.len);
+      this.ackMoved[lane.lid] ??= performance.now();
     }
   }
 
@@ -443,6 +456,49 @@ export class OutgoingTransfer extends Base {
   }
 
   /**
+   * Drops a lane that has swallowed data without the receiver seeing any of it for
+   * LANE_DEAD_MS, while the receiver is otherwise answering. What it held is sent again at
+   * the end of the pass, like anything else that went missing.
+   */
+  #checkLanes() {
+    if (this.state !== 'sending' && this.state !== 'verifying') return;
+    const now = performance.now();
+    if (now - this.lastProgress > 5000) return; // the receiver itself is quiet: not one lane's fault
+    for (const lane of this.session.openLanes()) {
+      const outstanding = (this.sentByLane.get(lane.lid) || 0) - (this.ackR[lane.lid] || 0);
+      if (outstanding <= 0) {
+        this.ackMoved[lane.lid] = now;
+        continue;
+      }
+      if (now - (this.ackMoved[lane.lid] ?? now) > LANE_DEAD_MS) {
+        this.ackMoved[lane.lid] = now;
+        this.session.dropLane(lane, 'nothing it carried was acknowledged');
+      }
+    }
+  }
+
+  /** The transfer's own accounting, for the diagnostics report. */
+  debug() {
+    const lanes = {};
+    for (const [lid, sent] of this.sentByLane) {
+      lanes[lid] = { sent, acked: this.ackR[lid] || 0, open: this.session.laneOpen(lid) };
+    }
+    return {
+      direction: 'out',
+      state: this.state,
+      pass: this.pass,
+      window: this.window,
+      inflight: this.window ? this.#inflight() : 0,
+      received: this.recv,
+      written: this.written,
+      processed: this.ackW,
+      lanes,
+      waitsMs: Object.fromEntries(Object.entries(this.waitTotals).map(([k, v]) => [k, Math.round(v)])),
+      sinceAckMs: Math.round(performance.now() - this.lastProgress),
+    };
+  }
+
+  /**
    * Adds lanes while that helps: another WebRTC connection (more congestion windows and send
    * queues, which a long or fast path needs) or a relay lane (a separate route entirely).
    * Grow only while the lanes are the bottleneck (not the receiver's disk, not our reads,
@@ -510,7 +566,13 @@ export class OutgoingTransfer extends Base {
       case 'ack': {
         // Acks may come by either path and overtake each other: every count only grows.
         if (m.r && typeof m.r === 'object') {
-          for (const lid in m.r) this.ackR[lid] = Math.max(this.ackR[lid] || 0, Number(m.r[lid]) || 0);
+          for (const lid in m.r) {
+            const r = Number(m.r[lid]) || 0;
+            if (r > (this.ackR[lid] || 0)) {
+              this.ackR[lid] = r;
+              this.ackMoved[lid] = performance.now();
+            }
+          }
         }
         this.ackW = Math.max(this.ackW, Number(m.w) || 0);
         this.lastProgress = performance.now();
@@ -701,6 +763,20 @@ export class IncomingTransfer extends Base {
 
   onLanesChanged() {
     this.#check();
+  }
+
+  /** The transfer's own accounting, for the diagnostics report. */
+  debug() {
+    return {
+      direction: 'in',
+      state: this.state,
+      received: this.recv,
+      written: this.written,
+      duplicates: this.dup,
+      chunksMissing: this.remaining ?? null,
+      byLane: { ...this.recvByLane },
+      waitingForPass: this.sentInfo ? { pass: this.sentInfo.pass, lanes: this.sentInfo.lanes } : null,
+    };
   }
 
   onCtl(m) {

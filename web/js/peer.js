@@ -414,6 +414,11 @@ export class PeerSession extends Emitter {
       onClose: (l, why) => {
         l.opened.reject(new Error(why));
         if (relay.lanes.get(index) === l) relay.lanes.delete(index);
+        // The other side's end of this lane may not learn it is gone (a connection that
+        // died without closing): say so, so it stops sending into it.
+        if (this.state !== 'closed' && this.relay === relay && !['replaced', 'not needed'].includes(why)) {
+          this.sendCtl({ t: 'relay-gone', n: index }).catch(() => {});
+        }
         this.#lanesChanged();
         if (index === 0 && this.relay === relay && !this.#rtcCtlOpen() && this.state !== 'closed') {
           this.close(why.includes('other device') ? 'The other device left' : `Relay lost: ${why}`);
@@ -483,6 +488,16 @@ export class PeerSession extends Emitter {
   closeRelayLane(lane) {
     if (lane.index === 0 && this.#ctlVia() === 'relay') return;
     lane.close('not needed');
+  }
+
+  /**
+   * Gives up on a lane that swallows data (see transfer.js, LANE_DEAD_MS). The main WebRTC
+   * channel is never dropped: SCTP delivers or the connection fails outright.
+   */
+  dropLane(lane, why) {
+    console.warn(`dropping lane ${lane.lid}: ${why}`);
+    if (lane.kind === 'relay') lane.close(why);
+    else if (lane.lid !== '0') this.#closeLink(lane.lid, true);
   }
 
   // ---- control channel ---------------------------------------------------------------
@@ -585,6 +600,9 @@ export class PeerSession extends Emitter {
         break;
       case 'relay-lane':
         if (Number.isInteger(m.n) && m.n > 0 && m.n < MAX_RELAY_LANES) this.#openRelayLane(m.n);
+        break;
+      case 'relay-gone':
+        if (Number.isInteger(m.n)) this.relay?.lanes.get(m.n)?.close('the other device lost it');
         break;
       case 'offer':
         this.#onOffer(m);
@@ -852,6 +870,7 @@ export class PeerSession extends Emitter {
         rate: Math.round(l.rate ?? 0),
       })),
       chunk: this.chunkSize(),
+      transfers: [...this.outgoing.values(), ...this.incoming.values()].filter((t) => !t.terminal).map((t) => t.debug()),
       saturated: { webrtc: this.saturatedRtc, relay: this.saturatedRelay },
       closeReason: this.closeReason ?? null,
     };
