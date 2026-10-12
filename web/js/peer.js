@@ -335,6 +335,7 @@ export class PeerSession extends Emitter {
         this.emit('path', path);
         this.emit('state');
       }
+      if (path === 'turn') this.#preferRelayOverTurn();
     } catch {
       /* closed meanwhile */
     }
@@ -434,6 +435,16 @@ export class PeerSession extends Emitter {
 
   relayLaneCount() {
     return this.relay ? this.relay.lanes.size : 0;
+  }
+
+  /**
+   * WebRTC landed on TURN: no direct path exists. The relay is faster and free per byte, so
+   * when there is one it takes over at once, data and control alike; TURN stays connected
+   * as a backup and carries data again only if the relay goes.
+   */
+  #preferRelayOverTurn() {
+    if (!this.hasRelay() || this.relay || this.relayRequested || this.state === 'closed') return;
+    this.addRelayLane().catch(() => {});
   }
 
   /** One more relay lane: the first asks the server for a session, later ones tell the other device. */
@@ -630,6 +641,14 @@ export class PeerSession extends Emitter {
     return out;
   }
 
+  /** The lanes data should go on: every open one, but TURN only while no relay lane is ready. */
+  dataLanes() {
+    const lanes = this.openLanes();
+    if (this.path !== 'turn') return lanes;
+    const relay = lanes.filter((l) => l.kind === 'relay');
+    return relay.length ? relay : lanes;
+  }
+
   #allLanes() {
     return [...this.links.values(), ...(this.relay ? this.relay.lanes.values() : [])];
   }
@@ -800,7 +819,7 @@ export class PeerSession extends Emitter {
 
   /** How data travels now, for people: lan, direct, turn, relay, direct+relay, turn+relay. */
   route() {
-    const lanes = this.openLanes();
+    const lanes = this.dataLanes();
     const rtc = lanes.some((l) => l.kind === 'rtc');
     const relay = lanes.some((l) => l.kind === 'relay');
     if (rtc && relay) return this.path === 'turn' ? 'turn+relay' : 'direct+relay';

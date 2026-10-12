@@ -364,7 +364,7 @@ export class OutgoingTransfer extends Base {
   #pickLane() {
     let best = null;
     let bestTime = Infinity;
-    for (const l of this.session.openLanes()) {
+    for (const l of this.session.dataLanes()) {
       const queued = l.buffered;
       if (queued >= (l.high ?? LANE_HIGH)) continue;
       const time = (queued + 1) / (l.rate || 50e6);

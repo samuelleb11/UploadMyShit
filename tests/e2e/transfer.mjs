@@ -436,6 +436,31 @@ try {
       await b.evaluate(() => (window.__ums.settings.turnOnly = false));
     });
 
+    // Needs a real TURN server: run with UMS_CLOUDFLARE_TURN_KEY_ID and
+    // UMS_CLOUDFLARE_TURN_API_TOKEN in the environment (the test server reads them).
+    if (process.env.UMS_CLOUDFLARE_TURN_KEY_ID) {
+      await step('a connection that lands on TURN hands its data to the relay', async () => {
+        await reconnect();
+        await a.evaluate(() => (window.__ums.settings.turnOnly = true));
+        await b.evaluate(() => (window.__ums.settings.turnOnly = true));
+        await b.evaluate(async () => {
+          const dest = await (await navigator.storage.getDirectory()).getDirectoryHandle('dest-turn', { create: true });
+          window.__ums.setAutoAccept(() => ({ mode: 'dir', dir: dest }));
+        });
+        const r = await send([]);
+        assert.equal(r.state, 'done', r.error);
+        const d = await a.evaluate((id) => window.__ums.sessions.get(id).diagnostics(), idB);
+        assert.equal(d.webrtc?.path?.path, 'turn', 'WebRTC went through TURN');
+        assert.equal(d.route, 'relay');
+        assert.equal(d.control, 'relay');
+        console.log(`     ${(total / 1e6 / r.seconds).toFixed(0)} MB/s, lanes used: ${r.lanesUsed.join(', ')}`);
+        assert.ok(r.lanesUsed.some((lid) => lid.startsWith('r')), 'the relay carried data');
+        const tree = await b.evaluate(readTree, 'dest-turn');
+        for (const [path, hash] of Object.entries(hashes)) assert.equal(tree.files[path], hash, `content of ${path}`);
+        await b.evaluate(dropTree, 'dest-turn');
+      });
+    }
+
     await step('"always use the relay" sends everything through it, encrypted, byte for byte', async () => {
       await reconnect();
       await a.evaluate(() => (window.__ums.settings.forceRelay = true));
