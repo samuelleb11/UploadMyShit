@@ -604,6 +604,12 @@ try {
     await new Promise((r) => setTimeout(r, 1500));
     assert.equal(loads, 2, `loaded ${loads} times: once, then one reload`);
     await c.close();
+    // The server notices the extra tab is gone a moment later (slower on CI): wait for it,
+    // so the next step counts only the two test devices.
+    for (let i = 0; i < 100; i++) {
+      if ((await (await fetch(`${url}/healthz`)).json()).stats.peers === 2) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
   });
 
   await step('the server stayed healthy and saw both devices', async () => {
