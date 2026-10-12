@@ -32,9 +32,13 @@ pub enum ClientMsg {
     },
     /// Fresh ICE servers, for TURN credentials close to expiring.
     GetIce,
-    /// A relay session with one other device in the same room: both get a ticket.
+    /// A relay session with one other device in the same room: both get a ticket. `sid` and
+    /// `rsid` are the page's own connection ids, opaque here, passed back on both tickets so
+    /// each page can tell a ticket for its current connection from a stale one.
     Relay {
         to: String,
+        sid: Option<String>,
+        rsid: Option<String>,
     },
     /// Keep-alive. Browsers cannot see WebSocket pings, so the page sends its own.
     Ping,
@@ -52,6 +56,8 @@ struct Frame {
     device: Option<DeviceInfo>,
     to: Option<String>,
     data: Option<Box<RawValue>>,
+    sid: Option<String>,
+    rsid: Option<String>,
 }
 
 impl ClientMsg {
@@ -75,6 +81,8 @@ impl ClientMsg {
             "get-ice" => ClientMsg::GetIce,
             "relay" => ClientMsg::Relay {
                 to: f.to.clone().ok_or_else(|| missing("to"))?,
+                sid: f.sid,
+                rsid: f.rsid,
             },
             "ping" => ClientMsg::Ping,
             other => return Err(format!("unknown message type {other:?}")),
@@ -150,6 +158,11 @@ pub enum ServerMsg<'a> {
         exp: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         sig: Option<&'a str>,
+        /// The requesting page's connection ids, as it sent them.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sid: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rsid: Option<&'a str>,
     },
     Pong,
     Error {
@@ -195,8 +208,8 @@ mod tests {
         ));
         assert!(ClientMsg::parse(r#"{"t":"nope"}"#).is_err());
         assert!(matches!(
-            ClientMsg::parse(r#"{"t":"relay","to":"p2"}"#).unwrap(),
-            ClientMsg::Relay { ref to } if to == "p2"
+            ClientMsg::parse(r#"{"t":"relay","to":"p2","sid":"s1"}"#).unwrap(),
+            ClientMsg::Relay { ref to, sid: Some(ref s), rsid: None } if to == "p2" && s == "s1"
         ));
         assert!(ClientMsg::parse(r#"{"t":"relay"}"#).is_err());
         assert!(ClientMsg::parse(r#"{"t":"signal","to":"p1"}"#).is_err());

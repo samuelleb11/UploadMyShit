@@ -17,7 +17,7 @@
 // measured drain rate the sender uses to keep each lane's queue about as deep as it drains
 // in under a second.
 
-import { Emitter, deferred, withTimeout } from './util.js';
+import { Emitter, deferred, randomToken, withTimeout } from './util.js';
 import { HDR, LANE_HIGH, LANE_LOW, IncomingTransfer, OutgoingTransfer } from './transfer.js';
 import { RelayLane, T_CTL, ctlText, deriveKey, makeKeyPair } from './relay.js';
 
@@ -102,6 +102,27 @@ export class PeerSession extends Emitter {
     this.ignoreOffer = false;
     this.restarts = 0;
     this.connected = deferred();
+    // Every signal carries this session's id (sid) and the other side's session it is for
+    // (rsid), so messages from an earlier connection still in flight cannot disturb this one.
+    this.sid = randomToken(9);
+    this.remoteSid = null;
+  }
+
+  /** A signal that starts a conversation (an offer, a relay request), rather than replying. */
+  static opens(data) {
+    return (data.k === 'sdp' && data.d?.type === 'offer') || data.k === 'relay-please';
+  }
+
+  /**
+   * What a signal from the other device means for this session: 'take' it, 'drop' it (it
+   * belongs to an earlier connection), or 'replace' this session (the other device
+   * reconnected and is starting over). Relay keys name their relay session themselves.
+   */
+  judge(data) {
+    if (data.rsid && data.rsid !== this.sid) return 'drop';
+    if (data.k === 'relay-key') return 'take';
+    if (this.remoteSid && data.sid !== this.remoteSid) return PeerSession.opens(data) ? 'replace' : 'drop';
+    return 'take';
   }
 
   // ---- connecting --------------------------------------------------------------------
@@ -190,11 +211,12 @@ export class PeerSession extends Emitter {
   }
 
   #signal(data) {
-    this.signaling.signal(this.remoteId, data);
+    this.signaling.signal(this.remoteId, { ...data, sid: this.sid, rsid: this.remoteSid });
   }
 
   /** Negotiation from the signaling server, handled strictly in arrival order. */
   handleSignal(data) {
+    if (data.k !== 'relay-key' && this.remoteSid === null && data.sid) this.remoteSid = data.sid;
     this.sigChain = this.sigChain.then(() => this.#handleSignal(data)).catch((e) => console.warn('signal', e));
   }
 
@@ -211,6 +233,8 @@ export class PeerSession extends Emitter {
       }
       return;
     }
+    // Always relay: WebRTC is not started, whatever the other device offers.
+    if (this.settings.forceRelay && !this.mainPromise) return;
     const pc = await this.#main();
     if (data.k === 'sdp') {
       const d = data.d;
@@ -326,7 +350,7 @@ export class PeerSession extends Emitter {
     if (!this.hasRelay() || this.relayRequested || this.state === 'closed') return;
     this.relayRequested = true;
     this.#beginConnecting();
-    if (this.polite) this.signaling.send({ t: 'relay', to: this.remoteId });
+    if (this.polite) this.signaling.send({ t: 'relay', to: this.remoteId, sid: this.sid, rsid: this.remoteSid });
     else this.#signal({ k: 'relay-please' });
   }
 
@@ -337,6 +361,7 @@ export class PeerSession extends Emitter {
    */
   onRelayTicket(ticket) {
     if (this.state === 'closed') return;
+    if (ticket.role === 'b' && this.remoteSid === null && ticket.sid) this.remoteSid = ticket.sid;
     if (this.relay && this.relay.ticket.session <= ticket.session) return;
     if (this.relay) this.#dropRelay();
     this.relayRequested = true;

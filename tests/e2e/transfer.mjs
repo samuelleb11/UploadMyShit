@@ -6,6 +6,8 @@
 // UMS_BIN       the server binary (default: target/debug/uploadmyshit)
 // CHROME_PATH   a Chrome to drive; unset uses Playwright's own Chromium (the CI image's)
 // UMS_E2E_MB    size of the large file, in MB (default 256)
+// UMS_E2E_THROTTLE  slow both pages' CPUs by this factor, to shake out races CI's slower
+//                   runners would find
 //
 // With worker/node_modules installed (cd worker && npm ci), the relay Worker runs locally
 // under `wrangler dev` and the relay scenarios run too.
@@ -208,6 +210,13 @@ try {
       if (m.type() === 'error' || m.type() === 'warning') console.log(`[${name} ${m.type()}] ${m.text()}`);
     });
   }
+  const throttle = Number(process.env.UMS_E2E_THROTTLE ?? 1);
+  if (throttle > 1) {
+    for (const [ctx, page] of [[browsers[0], a], [browsers[1], b]]) {
+      const cdp = await ctx.newCDPSession(page);
+      await cdp.send('Emulation.setCPUThrottlingRate', { rate: throttle });
+    }
+  }
   await a.goto(url);
   await b.goto(url);
   await a.evaluate(installHash);
@@ -370,6 +379,41 @@ try {
     await b.evaluate((id) => window.__ums.sessions.get(id)?.close('test'), idA);
   };
   const routeOf = () => a.evaluate((id) => window.__ums.sessions.get(id)?.route(), idB);
+
+  await step('signals left over from a closed connection do not revive it', async () => {
+    // A live connection first, so there are session ids to go stale.
+    await reconnect();
+    await b.evaluate(async () => {
+      const dest = await (await navigator.storage.getDirectory()).getDirectoryHandle('dest-stale', { create: true });
+      window.__ums.setAutoAccept(() => ({ mode: 'dir', dir: dest }));
+    });
+    const old = await a.evaluate(async (to) => {
+      const t = window.__ums.send(to, [{ path: 'one.txt', file: new File(['1'], 'one.txt') }], []);
+      await new Promise((resolve) => t.on('state', () => t.terminal && resolve()));
+      const s = window.__ums.sessions.get(to);
+      return { sid: s.sid, rsid: s.remoteSid };
+    }, idB);
+    assert.ok(old.sid && old.rsid);
+    await reconnect();
+    // What the old connection might still have in flight: an answer, a candidate, and an
+    // offer for B's old session.
+    await a.evaluate(
+      ({ to, old }) => {
+        const stale = { sid: old.sid, rsid: old.rsid };
+        window.__ums.signal(to, { k: 'sdp', d: { type: 'answer', sdp: 'v=0' }, ...stale });
+        window.__ums.signal(to, { k: 'ice', c: { candidate: '', sdpMid: '0' }, ...stale });
+        window.__ums.signal(to, { k: 'sdp', d: { type: 'offer', sdp: 'v=0' }, ...stale });
+      },
+      { to: idB, old },
+    );
+    await new Promise((r) => setTimeout(r, 500));
+    const revived = await b.evaluate((id) => {
+      const s = window.__ums.sessions.get(id);
+      return s && s.state !== 'closed' ? s.state : null;
+    }, idA);
+    assert.equal(revived, null, 'B started a connection from stale signals');
+    await b.evaluate(dropTree, 'dest-stale');
+  });
 
   if (relay) {
     await step('with no direct path, the page falls back to the relay by itself', async () => {

@@ -132,8 +132,43 @@ signaling.on('peer-updated', (m) => {
     layout();
   }
 });
-signaling.on('signal', (m) => session(m.from).handleSignal(m.data));
-signaling.on('relay', (m) => session(m.peer).onRelayTicket(m));
+signaling.on('signal', (m) => {
+  const data = m.data ?? {};
+  let s = sessions.get(m.from);
+  if (s?.state === 'closed') s = null;
+  if (s) {
+    const verdict = s.judge(data);
+    if (verdict === 'drop') return;
+    if (verdict === 'replace') {
+      s.close('the other device reconnected');
+      s = null;
+    }
+  }
+  // Without a session, only a first contact starts one: an offer addressed to no session of
+  // ours, a relay request, or the relay key that can overtake its ticket.
+  if (!s && data.k !== 'relay-key' && !(PeerSession.opens(data) && !data.rsid)) return;
+  session(m.from).handleSignal(data);
+});
+signaling.on('relay', (m) => {
+  let s = sessions.get(m.peer);
+  if (s?.state === 'closed') s = null;
+  if (m.role === 'a') {
+    // Ours: only the connection that asked takes it, never a later one.
+    if (s && s.sid === m.sid) s.onRelayTicket(m);
+    return;
+  }
+  // The other device asked: judged as a relay request from that connection of it.
+  if (s) {
+    const verdict = s.judge({ k: 'relay-please', sid: m.sid, rsid: m.rsid });
+    if (verdict === 'drop') return;
+    if (verdict === 'replace') {
+      s.close('the other device reconnected');
+      s = null;
+    }
+  }
+  if (!s && m.rsid) return; // meant for a connection of ours that is gone
+  session(m.peer).onRelayTicket(m);
+});
 signaling.on('ice', (m) => {
   ice = m.ice;
   for (const r of iceWaiters.splice(0)) r(ice);
@@ -915,6 +950,7 @@ window.__ums = {
   sessions,
   transfers: () => [...transfers.values()].map((e) => e.t),
   send: (peerId, files, dirs) => sendTo(peerId, files, dirs),
+  signal: (to, data) => signaling.signal(to, data),
   setAutoAccept: (fn) => {
     autoAccept = fn;
   },

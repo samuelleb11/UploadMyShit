@@ -78,6 +78,14 @@ pub fn peer_id(secret: &str) -> String {
     digest[..10].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A page's connection id, passed through untouched when it is short and plain.
+fn opaque_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 fn valid_secret(s: &str) -> bool {
     (16..=128).contains(&s.len())
         && s.bytes()
@@ -267,9 +275,11 @@ async fn session(socket: WebSocket, state: Arc<AppState>, ip: IpAddr, admission:
                     message: "that name is empty",
                 }),
             },
-            Ok(ClientMsg::Relay { to }) => match &state.relay {
+            Ok(ClientMsg::Relay { to, sid, rsid }) => match &state.relay {
                 Some(relay) => {
                     let t = relay.mint();
+                    let sid = sid.as_deref().filter(|s| opaque_id(s));
+                    let rsid = rsid.as_deref().filter(|s| opaque_id(s));
                     let theirs = ServerMsg::Relay {
                         peer: &id,
                         url: &t.url,
@@ -277,6 +287,8 @@ async fn session(socket: WebSocket, state: Arc<AppState>, ip: IpAddr, admission:
                         role: "b",
                         exp: t.exp,
                         sig: t.sig.as_deref(),
+                        sid,
+                        rsid,
                     };
                     match state.hub.send_to(&id, &to, theirs.to_json()) {
                         Ok(()) => reply(ServerMsg::Relay {
@@ -286,6 +298,8 @@ async fn session(socket: WebSocket, state: Arc<AppState>, ip: IpAddr, admission:
                             role: "a",
                             exp: t.exp,
                             sig: t.sig.as_deref(),
+                            sid,
+                            rsid,
                         }),
                         Err(e) => reply(ServerMsg::Error {
                             code: e.code(),

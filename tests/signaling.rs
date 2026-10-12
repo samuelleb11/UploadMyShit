@@ -306,9 +306,19 @@ async fn relay_tickets_go_to_both_devices_and_no_one_else() {
     assert_eq!(recv(&mut a).await["t"], "peer-joined");
     let b_id = wb["id"].as_str().unwrap();
 
-    send(&mut a, json!({"t": "relay", "to": b_id})).await;
+    send(
+        &mut a,
+        json!({"t": "relay", "to": b_id, "sid": "conn-a", "rsid": "<bad>"}),
+    )
+    .await;
     let ta = recv(&mut a).await;
     let tb = recv(&mut b).await;
+    // The requester's connection ids come back on both tickets; anything odd is dropped.
+    assert_eq!(
+        (ta["sid"].as_str(), tb["sid"].as_str()),
+        (Some("conn-a"), Some("conn-a"))
+    );
+    assert!(ta.get("rsid").is_none() && tb.get("rsid").is_none());
     assert_eq!(ta["t"], "relay");
     assert_eq!(tb["t"], "relay");
     assert_eq!(ta["session"], tb["session"]);
