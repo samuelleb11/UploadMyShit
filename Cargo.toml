@@ -3,7 +3,9 @@ name = "uploadmyshit"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+license = "MIT"
 description = "Peer-to-peer file transfer in the browser: a signaling server that never carries a byte of the files."
+repository = "https://github.com/samuelleb11/UploadMyShit"
 publish = false
 
 [dependencies]

@@ -189,7 +189,9 @@ client addresses or set `server.networkRooms=false`.
 
 ### CI/CD
 
-[.gitlab-ci.yml](.gitlab-ci.yml) follows agent-router's pipeline:
+The project lives on a GitLab instance; [GitHub](https://github.com/samuelleb11/UploadMyShit)
+carries a mirror of `main`. [.gitlab-ci.yml](.gitlab-ci.yml) follows
+[agent-router](https://github.com/samuelleb11/agent-router)'s pipeline:
 - **Checks:** Rust fmt, clippy and tests; the page's unit tests; the two-browser
   end-to-end test; the chart checks.
 - **Release:** an image per commit, `latest` on `main`, the chart published per commit,
@@ -197,6 +199,10 @@ client addresses or set `server.networkRooms=false`.
 
 Set these CI/CD variables: `CI_TEMPLATES_PROJECT`, `DEPLOY_TOKEN_USER`/`DEPLOY_TOKEN`,
 `UPLOADMYSHIT_VALUES` (a file variable) and, optionally, `KUBE_CONTEXT`.
+
+The image jobs come from a shared template project (`CI_TEMPLATES_PROJECT`) that is not
+part of this repository. Elsewhere, replace them with your own `docker build` and push;
+every other job runs on a public image and is defined in full here.
 
 ## Development
 
@@ -240,3 +246,7 @@ scripts/check-chart.sh
 - Move receiving into a Worker with transferable `RTCDataChannel` (Chrome 130+).
 - A short verification code from both DTLS fingerprints, to detect a man in the middle.
 - Several replicas, with rooms in a shared store.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

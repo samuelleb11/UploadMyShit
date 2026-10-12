@@ -9,6 +9,9 @@ type: application
 # built for as appVersion (scripts/package-chart.sh).
 version: 0.1.0
 appVersion: "0.1.0"
+home: https://github.com/samuelleb11/UploadMyShit
+sources:
+  - https://github.com/samuelleb11/UploadMyShit
 keywords:
   - webrtc
   - file-transfer
