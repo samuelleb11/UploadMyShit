@@ -1,0 +1,19 @@
+# Kept out of the build context. Everything here is also in .gitignore, and that is a rule:
+# the binary is stamped with the commit git reports for the context (build.rs), so `.git`
+# stays in and no tracked file may be left out.
+#
+# A .dockerignore pattern with no slash matches only at the root, hence the `**/`.
+
+target
+.cargo
+chart
+**/node_modules
+**/.env*
+**/*.pem
+**/*.key
+**/*.log
+**/.DS_Store
+.idea
+.vscode
+.claude/settings.local.json
+.claude/worktrees

@@ -1,0 +1,34 @@
+{{- $fullname := include "uploadmyshit.fullname" . }}
+UploadMyShit {{ .Chart.AppVersion }}: {{ $fullname }} in {{ .Release.Namespace }}
+{{- if .Values.ingress.enabled }}
+
+Open it at:
+
+  {{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}/
+{{- if not .Values.ingress.tls.enabled }}
+
+WARNING: without TLS, browsers refuse folder access and some refuse WebRTC. Enable
+ingress.tls.
+{{- end }}
+{{- else }}
+
+There is no ingress. To try it from this machine:
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ $fullname }} 8080:{{ .Values.service.port }}
+
+then open http://localhost:8080/ in two browser windows.
+{{- end }}
+{{- if .Values.server.networkRooms }}
+
+Network rooms are on: devices behind one public address see each other. Check that the
+server sees real visitor addresses. Open the page from two different networks (a phone off
+Wi-Fi, and a computer): they must NOT see each other. If they do, the ingress controller is
+hiding client addresses (see server.clientIpHeader in values.yaml); fix that, or set
+server.networkRooms=false so only private rooms exist.
+{{- end }}
+{{- if not (or .Values.ice.turn.urls .Values.ice.cloudflare.keyId .Values.ice.cloudflare.existingSecret) }}
+
+No TURN server is configured. Most devices connect directly; a pair whose networks allow
+no direct path (some corporate and mobile networks) will fail to connect. Configure
+ice.turn or ice.cloudflare to relay for them.
+{{- end }}

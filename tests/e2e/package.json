@@ -1,0 +1,12 @@
+{
+  "name": "uploadmyshit-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Two real browsers sending files to each other through a running server.",
+  "scripts": {
+    "test": "node transfer.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.64.0"
+  }
+}

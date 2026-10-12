@@ -1,0 +1,10 @@
+{
+  "name": "UploadMyShit",
+  "short_name": "UploadMyShit",
+  "description": "Send files and folders browser to browser.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0e1016",
+  "theme_color": "#0e1016",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

@@ -1,93 +1,242 @@
 # UploadMyShit
 
+Send files and whole folders from one browser to another, peer to peer. It's a ShareDrop
+replacement that streams straight to disk and moves large files at the fastest rate
+Chrome's WebRTC allows.
 
+- **Peer to peer.** File bytes go browser to browser over WebRTC data channels. The server
+  only introduces devices and relays their connection setup, a few KB per transfer. It
+  never sees a byte of the files.
+- **Drag and drop, many files and folders at once.** Drop any mix of files and folders on
+  a device, or click it to pick some. Folder structure is kept, empty folders included.
+- **Streams straight to disk (Chrome).** The receiver picks a destination folder once and
+  Chrome remembers it. Files and folders are written in place as they arrive, and each
+  file appears, complete, the moment its last byte lands. Nothing waits for the whole
+  batch and nothing is held in memory. Existing files are never overwritten: a clash
+  becomes `name (2)`.
+- **Automatic parallelism and flow control.** Disk reads run ahead in parallel. Writes
+  happen in a Web Worker and merge into large sequential writes. Extra WebRTC connections
+  open while they raise throughput, and stop once one fails to add 10%. The receiver
+  grants a credit window, so a slow disk throttles the sender instead of filling memory.
+  An optional upload cap applies across all transfers.
+- **Works across networks.** Devices behind the same public address see each other
+  automatically. A private room (a link or a QR code) connects devices anywhere. An
+  external TURN service relays only when no direct path exists.
 
-## Getting started
-
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## How it works
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.example.com/example-org/uploadmyshit.git
-git branch -M main
-git push -uf origin main
+ Browser A ──── WebSocket (signaling: who's here, SDP, ICE) ────┐
+     │                                                          ▼
+     │                                          uploadmyshit (Rust, axum)
+     │                                          rooms in memory, no storage
+ Browser B ──── WebSocket ──────────────────────────────────────┘
+     ▲
+     └──── WebRTC data channels, DTLS-encrypted, direct ────── Browser A
+           (relayed through your TURN provider only when no direct path exists)
 ```
 
-## Integrate with your tools
+- **Server** ([src/](src/)): serves the page, which is compiled into the binary, and one
+  WebSocket at `/ws`.
+  - **Rooms.** A *network room* holds everyone behind one public IPv4 address or IPv6
+    /64. A *private room* is named by a code in the URL (`/r/<code>`). A device can only
+    signal devices in its own room.
+  - **ICE servers.** The server hands out STUN servers and TURN credentials. It mints the
+    credentials (coturn shared-secret scheme) or fetches them (Cloudflare).
+  - **Health.** `/healthz` and `/readyz`.
+- **Page** ([web/](web/)): hand-written HTML, CSS and JavaScript modules. No build step,
+  no dependencies.
+  - [peer.js](web/js/peer.js): WebRTC connections. The first is negotiated through the
+    server; extra ones are negotiated over the first, browser to browser.
+  - [transfer.js](web/js/transfer.js): the transfer protocol (chunking, lanes, credit
+    window, resend, adaptive scaling).
+  - [sink-worker.js](web/js/sink-worker.js): disk writes.
+  - [app.js](web/js/app.js): the UI.
 
-* [Set up project integrations](https://gitlab.example.com/example-org/uploadmyshit/-/settings/integrations)
+Integrity: data channels are reliable and DTLS-authenticated. On top of that, every chunk
+is tracked by index. If a connection dies mid-transfer, the receiver asks again for
+exactly what it is missing.
 
-## Collaborate with your team
+## Browsers
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+**Chrome on a computer is the supported browser.** It has the File System Access API that
+lets the receiver stream into a folder. Every browser with WebRTC can *send*.
 
-## Test and Deploy
+Browsers without folder access can still *receive*: Chrome on Android, anything on iOS,
+Firefox and Safari. Each file downloads on its own as soon as it is complete. Folder
+structure is lost there, because a download is a single file.
 
-Use the built-in continuous integration in GitLab.
+## Performance
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+Chrome's data channels are the ceiling, not this code. Each ~1.2 KB packet crosses from
+the page's process to Chrome's network process separately. Chromium has a batched path
+but it is switched off. No published Chrome browser-to-browser measurement exceeds about
+45 MB/s.
 
-***
+Measured with two separate Chrome processes on one Apple Silicon Mac, streaming into a
+folder:
 
-# Editing this README
+| Setup | Throughput |
+| --- | --- |
+| Raw data channel, 1 connection (no app) | 37 MB/s (296 Mbps) |
+| This app, 1 connection | 31–45 MB/s (248–360 Mbps) |
+| This app, 4 connections | 36–42 MB/s (288–336 Mbps) |
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+Two machines each give their side a full CPU, so real LAN transfers should do at least
+this well. Relayed transfers run at whatever the TURN provider allows.
 
-## Suggestions for a good README
+## Running it locally
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+```sh
+cargo run
+# open http://localhost:8080 in two browser windows (or two devices on your LAN)
+```
 
-## Name
-Choose a self-explaining name for your project.
+A debug build serves `web/` from disk, so edits to the page only need a reload. A release
+build (`cargo build --release`) embeds it.
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+Browsers give WebRTC and folder access only to secure pages. `localhost` counts as
+secure; a LAN address over plain HTTP does not. Use TLS (the Helm chart's ingress does)
+to try it across devices.
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+## Configuration
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+Every flag has an environment variable. Run `uploadmyshit --help` for the full list.
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+| Variable | Default | |
+| --- | --- | --- |
+| `UMS_BIND` | `0.0.0.0:8080` | Listen address |
+| `UMS_NETWORK_ROOMS` | `true` | Automatic rooms by public address. `false`: private rooms only |
+| `UMS_CLIENT_IP_HEADER` | – | e.g. `x-forwarded-for`; read only from `UMS_TRUSTED_PROXIES` |
+| `UMS_TRUSTED_PROXIES` | – | CIDRs of the proxies in front, comma-separated |
+| `UMS_IPV4_PREFIX` / `UMS_IPV6_PREFIX` | `32` / `64` | What makes up one network room |
+| `UMS_MAX_ROOM_PEERS` | `50` | |
+| `UMS_MAX_CONNECTIONS` / `UMS_MAX_CONNECTIONS_PER_IP` | `10000` / `64` | |
+| `UMS_STUN_URLS` | Cloudflare + Google STUN | Comma-separated; empty for none |
+| `UMS_TURN_URLS` | – | External `turn:`/`turns:` URLs |
+| `UMS_TURN_USERNAME`, `UMS_TURN_CREDENTIAL` | – | Static TURN credentials |
+| `UMS_TURN_SECRET` | – | coturn `use-auth-secret`: per-device, time-limited credentials |
+| `UMS_TURN_TTL` | `86400` | Lifetime of generated credentials; make it longer than any transfer |
+| `UMS_CLOUDFLARE_TURN_KEY_ID`, `UMS_CLOUDFLARE_TURN_API_TOKEN` | – | Cloudflare Realtime TURN |
+| `UMS_SHUTDOWN_DELAY` | `5` | Seconds of failing readiness before connections close on SIGTERM |
+| `UMS_LOG`, `UMS_LOG_FORMAT` | `info`, `text` | Log filter; `json` for structured logs |
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+### TURN
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+Most pairs of devices connect directly; STUN is enough for that. A pair whose networks
+allow no direct path needs a relay. This happens with symmetric NATs on some corporate
+and mobile networks. The server hosts no relay: point it at an external one.
+
+- **Cloudflare Realtime TURN:** set the key id and API token. The server fetches
+  short-lived ICE servers from Cloudflare, caches them for half their lifetime and hands
+  them out. Cloudflare's port-53 URLs are filtered out because browsers block that port.
+- **coturn**, or any TURN server that supports the REST shared-secret scheme: set
+  `UMS_TURN_URLS` and `UMS_TURN_SECRET`. Each device gets its own credentials, which
+  expire.
+- **Static credentials:** set `UMS_TURN_URLS`, `UMS_TURN_USERNAME` and
+  `UMS_TURN_CREDENTIAL`.
+
+The page never opens extra parallel connections over a relay, so it doesn't multiply
+relay traffic.
+
+## Deploying
+
+### Docker
+
+```sh
+docker build -t uploadmyshit .
+docker run -p 8080:8080 -e UMS_CLOUDFLARE_TURN_KEY_ID=... -e UMS_CLOUDFLARE_TURN_API_TOKEN=... uploadmyshit
+```
+
+The image is distroless, runs as non-root and writes nothing.
+
+### Kubernetes (Helm)
+
+The chart is in [charts/uploadmyshit](charts/uploadmyshit). CI publishes it to this
+project's Helm registry: the `stable` channel from `main`, `dev` from `dev`. It runs
+**one replica**, because rooms live in memory. That is plenty: the server carries
+signaling only.
+
+An example values file, which is what CI's `UPLOADMYSHIT_VALUES` file variable holds:
+
+```yaml
+imagePullSecrets:
+  - name: gitlab-registry
+ingress:
+  enabled: true
+  className: nginx
+  host: drop.example.com
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+ice:
+  cloudflare:
+    existingSecret: uploadmyshit-turn   # keys: key-id, api-token
+```
+
+```sh
+kubectl -n production create secret generic uploadmyshit-turn \
+  --from-literal=key-id=... --from-literal=api-token=...
+```
+
+**Network rooms need real client addresses.** The server reads `X-Forwarded-For` from the
+proxies in `server.trustedProxies` (private ranges by default). The ingress controller
+must see visitors' real addresses itself. For ingress-nginx, that means its Service uses
+`externalTrafficPolicy: Local`, or the load balancer sends the PROXY protocol.
+
+If every visitor arrives as one address, everyone lands in one room. To check, open the
+page from two different networks: they must not see each other. If they do, fix the
+client addresses or set `server.networkRooms=false`.
+
+### CI/CD
+
+[.gitlab-ci.yml](.gitlab-ci.yml) follows agent-router's pipeline:
+- **Checks:** Rust fmt, clippy and tests; the page's unit tests; the two-browser
+  end-to-end test; the chart checks.
+- **Release:** an image per commit, `latest` on `main`, the chart published per commit,
+  and `helm upgrade` to production on `main` at the commit's own image tag.
+
+Set these CI/CD variables: `CI_TEMPLATES_PROJECT`, `DEPLOY_TOKEN_USER`/`DEPLOY_TOKEN`,
+`UPLOADMYSHIT_VALUES` (a file variable) and, optionally, `KUBE_CONTEXT`.
+
+## Development
+
+```sh
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+node --test 'tests/web/*.test.mjs'
+
+# Two real Chrome processes sending files to each other through the server:
+cargo build && cd tests/e2e && npm ci
+CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" node transfer.mjs
+
+# Against the real Cloudflare API, with a key in the environment:
+UMS_CLOUDFLARE_TURN_KEY_ID=... UMS_CLOUDFLARE_TURN_API_TOKEN=... cargo test -- --ignored
+
+# The chart (needs helm):
+scripts/check-chart.sh
+```
+
+## Security notes
+
+- **Transfers need consent.** The receiver sees the sender, the file list and the total
+  size, and must accept each transfer.
+- **Incoming paths are sanitised.** No `..`, no absolute paths, no characters a
+  filesystem rejects, no Windows device names, no bidirectional-text tricks. Nothing is
+  written outside the chosen folder, and nothing there is overwritten.
+- **The page is locked down.** It loads nothing from anywhere else (strict CSP). The
+  WebSocket refuses other origins, so another site can't list the devices on your
+  network.
+- **Identity is per tab.** A device's id is derived from a secret held by its tab; a
+  reconnect keeps it, and nobody else can claim it.
+- **The server is limited.** It rate-limits signaling messages and caps connections per
+  address, devices per room and frame size.
+- **The server can see that devices connected, never what they sent.** It does relay the
+  WebRTC setup, so a compromised server could in principle insert itself (the DTLS
+  fingerprint arrives through it). Comparing fingerprints out of band would close that
+  gap; it is on the roadmap.
 
 ## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+- Resume an interrupted transfer, using the per-chunk tracking that already exists.
+- Move receiving into a Worker with transferable `RTCDataChannel` (Chrome 130+).
+- A short verification code from both DTLS fingerprints, to detect a man in the middle.
+- Several replicas, with rooms in a shared store.

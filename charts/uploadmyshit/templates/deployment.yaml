@@ -1,0 +1,143 @@
+{{- include "uploadmyshit.validate" . }}
+{{- $iceSecret := include "uploadmyshit.iceSecretName" . }}
+{{- $turnSecret := default $iceSecret .Values.ice.turn.existingSecret }}
+{{- $cfSecret := default $iceSecret .Values.ice.cloudflare.existingSecret }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "uploadmyshit.fullname" . }}
+  labels:
+    {{- include "uploadmyshit.labels" . | nindent 4 }}
+spec:
+  # One: rooms live in memory. See the note at the top of values.yaml.
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # The new pod serves before the old one stops; pages move over by reconnecting.
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "uploadmyshit.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "uploadmyshit.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Credentials changed inline roll the pod, which reads them only at start.
+        checksum/ice: {{ toJson .Values.ice | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Nothing here reads the variables Kubernetes would add for every Service.
+      enableServiceLinks: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: uploadmyshit
+          image: {{ include "uploadmyshit.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.server.extraArgs }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: UMS_BIND
+              value: "0.0.0.0:8080"
+            - name: UMS_LOG_FORMAT
+              value: {{ .Values.server.logFormat | quote }}
+            - name: UMS_LOG
+              value: {{ .Values.server.logLevel | quote }}
+            - name: UMS_NETWORK_ROOMS
+              value: {{ .Values.server.networkRooms | quote }}
+            - name: UMS_IPV4_PREFIX
+              value: {{ .Values.server.ipv4Prefix | quote }}
+            - name: UMS_IPV6_PREFIX
+              value: {{ .Values.server.ipv6Prefix | quote }}
+            - name: UMS_MAX_ROOM_PEERS
+              value: {{ .Values.server.maxRoomPeers | quote }}
+            - name: UMS_MAX_CONNECTIONS
+              value: {{ .Values.server.maxConnections | quote }}
+            - name: UMS_MAX_CONNECTIONS_PER_IP
+              value: {{ .Values.server.maxConnectionsPerIp | quote }}
+            {{- with .Values.server.clientIpHeader }}
+            - name: UMS_CLIENT_IP_HEADER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.server.trustedProxies }}
+            - name: UMS_TRUSTED_PROXIES
+              value: {{ join "," . | quote }}
+            {{- end }}
+            - name: UMS_SHUTDOWN_DELAY
+              value: {{ .Values.server.shutdownDelaySeconds | quote }}
+            - name: UMS_STUN_URLS
+              value: {{ join "," .Values.ice.stunUrls | quote }}
+            {{- with .Values.ice.turn.urls }}
+            - name: UMS_TURN_URLS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            - name: UMS_TURN_TTL
+              value: {{ .Values.ice.turn.ttlSeconds | quote }}
+            {{- if $turnSecret }}
+            {{- range $env, $key := dict "UMS_TURN_USERNAME" "turn-username" "UMS_TURN_CREDENTIAL" "turn-credential" "UMS_TURN_SECRET" "turn-secret" }}
+            - name: {{ $env }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $turnSecret }}
+                  key: {{ $key }}
+                  optional: true
+            {{- end }}
+            {{- end }}
+            {{- if $cfSecret }}
+            {{- range $env, $key := dict "UMS_CLOUDFLARE_TURN_KEY_ID" "key-id" "UMS_CLOUDFLARE_TURN_API_TOKEN" "api-token" }}
+            - name: {{ $env }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cfSecret }}
+                  key: {{ $key }}
+                  optional: true
+            {{- end }}
+            {{- end }}
+            {{- with .Values.server.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          startupProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 1
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+            failureThreshold: 3
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

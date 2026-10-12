@@ -1,0 +1,26 @@
+# Rust build output; .cargo is where CI keeps its registry cache
+/target
+/.cargo
+
+# The end-to-end test's dependencies
+node_modules/
+
+# Packaged charts (scripts/package-chart.sh)
+/chart/
+
+# Secrets never live in the tree: TURN credentials go in CI/CD variables and the cluster
+.env
+.env.*
+*.pem
+*.key
+
+# Logs, macOS and editors
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Claude Code: the per-project opt-in and worktrees are local to this machine
+.claude/settings.local.json
+.claude/worktrees/

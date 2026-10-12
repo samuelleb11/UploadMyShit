@@ -1,0 +1,15 @@
+apiVersion: v2
+name: uploadmyshit
+description: >-
+  Peer-to-peer file transfer in the browser. The server introduces devices to each other;
+  files and folders go browser to browser over WebRTC and never touch it.
+type: application
+# The chart's own version: bump the minor when a template changes. A published chart keeps
+# this major.minor, takes its pipeline's number as the patch, and names the commit it was
+# built for as appVersion (scripts/package-chart.sh).
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - webrtc
+  - file-transfer
+  - p2p

@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="Send files and folders straight to devices nearby or anywhere, browser to browser." />
+    <title>UploadMyShit</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/css/app.css" />
+    <script type="module" src="/js/app.js"></script>
+  </head>
+  <body>
+    <svg class="sprite" aria-hidden="true">
+      <symbol id="i-desktop" viewBox="0 0 24 24"><rect x="2.5" y="3.5" width="19" height="13" rx="2" /><path d="M8 20.5h8M12 16.5v4" /></symbol>
+      <symbol id="i-laptop" viewBox="0 0 24 24"><rect x="4" y="4.5" width="16" height="11" rx="1.5" /><path d="M2 19.5h20" /></symbol>
+      <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6.5" y="2.5" width="11" height="19" rx="2.5" /><path d="M10.5 18.5h3" /></symbol>
+      <symbol id="i-tablet" viewBox="0 0 24 24"><rect x="4" y="2.5" width="16" height="19" rx="2.5" /><path d="M10.5 18.5h3" /></symbol>
+      <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6" /></symbol>
+      <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6" /></symbol>
+      <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></symbol>
+      <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" /></symbol>
+      <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M2 8.8a15 15 0 0 1 20 0M5 12.6a10 10 0 0 1 14 0M8.5 16.4a5 5 0 0 1 7 0" /><circle cx="12" cy="20" r="0.6" /></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2.2h8.4A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z" /></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2.5H6.5A1.5 1.5 0 0 0 5 4v16a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 20V7.5z" /><path d="M14 2.5v5h5" /></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></symbol>
+    </svg>
+
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="UploadMyShit home">
+        <img src="/favicon.svg" alt="" width="28" height="28" />
+        <span>UploadMyShit</span>
+      </a>
+      <button id="room-btn" class="chip" type="button" aria-haspopup="dialog">
+        <svg class="icon" aria-hidden="true"><use href="#i-wifi" /></svg>
+        <span id="room-label">Your network</span>
+      </button>
+      <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings" aria-haspopup="dialog">
+        <svg class="icon" aria-hidden="true"><use href="#i-gear" /></svg>
+      </button>
+    </header>
+
+    <main class="stage">
+      <div id="field" class="field">
+        <div class="radar" aria-hidden="true"><span></span><span></span><span></span></div>
+        <ul id="peers" class="peers" aria-label="Devices you can send to"></ul>
+        <button id="me" class="me" type="button" aria-label="Your device: change its name">
+          <span class="avatar" id="me-avatar"><svg class="icon" aria-hidden="true"><use href="#i-laptop" /></svg></span>
+          <span class="name" id="me-name">…</span>
+          <span class="meta">You</span>
+        </button>
+      </div>
+      <p id="hint" class="hint"></p>
+    </main>
+
+    <section id="transfers" class="transfers" aria-label="Transfers" aria-live="polite"></section>
+
+    <footer class="footer">
+      <span id="status" class="status" data-state="offline"><i></i><span id="status-text">Connecting…</span></span>
+      <span class="footnote">Browser to browser. Files never touch the server.</span>
+      <span id="version" class="version"></span>
+    </footer>
+
+    <div id="drop-hint" class="drop-hint" hidden>Drop on a device to send</div>
+    <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+
+    <dialog id="offer-dialog" class="dialog">
+      <form method="dialog">
+        <h2 id="offer-title">Incoming files</h2>
+        <p id="offer-summary" class="muted"></p>
+        <ul id="offer-files" class="file-list"></ul>
+        <div id="offer-dest" class="dest">
+          <svg class="icon" aria-hidden="true"><use href="#i-folder" /></svg>
+          <span>Save to <strong id="offer-dest-name">a folder you choose</strong></span>
+          <button id="offer-change" type="button" class="link">Change…</button>
+        </div>
+        <p id="offer-note" class="note" hidden></p>
+        <div class="actions">
+          <button id="offer-decline" type="button" class="btn">Decline</button>
+          <button id="offer-accept" type="button" class="btn primary" autofocus>Accept</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="send-dialog" class="dialog">
+      <form method="dialog">
+        <h2 id="send-title">Send</h2>
+        <p class="muted">Pick files or a whole folder. You can also drag them onto the device.</p>
+        <div class="choices">
+          <button id="send-files" type="button" class="choice">
+            <svg class="icon" aria-hidden="true"><use href="#i-file" /></svg>Files
+          </button>
+          <button id="send-folder" type="button" class="choice">
+            <svg class="icon" aria-hidden="true"><use href="#i-folder" /></svg>Folder
+          </button>
+        </div>
+        <div class="actions"><button value="cancel" class="btn">Close</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="room-dialog" class="dialog">
+      <form method="dialog">
+        <div id="room-network">
+          <h2>Private room</h2>
+          <p class="muted">
+            Devices on your network appear on their own. To reach a device anywhere else, open a
+            private room and share its link.
+          </p>
+          <div class="actions start"><button id="room-create" type="button" class="btn primary">Create a private room</button></div>
+          <label class="field">
+            <span>Or join one with its code</span>
+            <span class="row">
+              <input id="room-code" type="text" inputmode="latin" autocomplete="off" spellcheck="false" maxlength="64" placeholder="room code" />
+              <button id="room-join" type="button" class="btn">Join</button>
+            </span>
+          </label>
+        </div>
+        <div id="room-private" hidden>
+          <h2>Room <span id="room-code-label"></span></h2>
+          <p class="muted">Anyone with this link joins the room and can see the devices in it.</p>
+          <div class="row">
+            <input id="room-link" type="text" readonly />
+            <button id="room-copy" type="button" class="btn">Copy</button>
+          </div>
+          <img id="room-qr" class="qr" alt="QR code of the room link" width="200" height="200" />
+          <div class="actions start"><button id="room-leave" type="button" class="btn">Back to my network</button></div>
+        </div>
+        <div class="actions"><button value="cancel" class="btn">Close</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="settings-dialog" class="dialog">
+      <form method="dialog">
+        <h2>Settings</h2>
+        <label class="field">
+          <span>This device's name</span>
+          <input id="set-name" type="text" maxlength="32" autocomplete="off" />
+        </label>
+        <div class="field" id="set-dest-field">
+          <span>Save received files to</span>
+          <span class="row">
+            <span id="set-dest" class="value">Not chosen yet</span>
+            <button id="set-dest-change" type="button" class="btn">Choose…</button>
+          </span>
+        </div>
+        <label class="field">
+          <span>Upload speed limit (MB/s, 0 for none)</span>
+          <input id="set-limit" type="number" min="0" step="1" inputmode="numeric" />
+        </label>
+        <label class="field">
+          <span>Parallel connections per device</span>
+          <select id="set-links">
+            <option value="auto">Automatic</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="4">4</option>
+            <option value="8">8</option>
+          </select>
+        </label>
+        <div class="actions"><button value="close" class="btn primary">Done</button></div>
+      </form>
+    </dialog>
+
+    <input id="pick-files" type="file" multiple hidden />
+    <input id="pick-folder" type="file" webkitdirectory hidden />
+  </body>
+</html>

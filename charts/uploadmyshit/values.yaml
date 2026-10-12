@@ -1,0 +1,131 @@
+# UploadMyShit's Helm chart: the signaling server.
+#
+# ONE replica. Rooms live in the process's memory, so two replicas would split a room in
+# two, each half unable to see the other. One is plenty: the server only passes a few
+# small messages per connection, never file data. A rollout overlaps the old pod and the
+# new one for a few seconds; pages reconnect to the new one on their own, and transfers
+# already running are browser to browser and do not notice.
+
+image:
+  # CI sets this to the project's registry image.
+  repository: registry.example.com/uploadmyshit/uploadmyshit
+  # Empty means the chart's appVersion. CI deploys the commit's own tag, so a rollback
+  # is a rollback of the binary and not just of the manifest.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+server:
+  # Automatic rooms: every device behind one public address (one NAT) sees the others, as
+  # in ShareDrop. This depends on the server seeing each visitor's real address -- see
+  # clientIpHeader below. Off: only private rooms, joined by link or code.
+  networkRooms: true
+  # How much of an address makes up one network room.
+  ipv4Prefix: 32
+  ipv6Prefix: 64
+  maxRoomPeers: 50
+  maxConnections: 10000
+  maxConnectionsPerIp: 64
+  # Where the visitor's address is, behind the ingress controller. The server believes the
+  # header only from the proxies listed, and takes the right-most address in it that is
+  # not one of them. The ingress controller must itself see real client addresses (for
+  # ingress-nginx: its Service with externalTrafficPolicy: Local, or the PROXY protocol
+  # from the load balancer). If every visitor arrives as the same address, every visitor
+  # lands in one network room: turn networkRooms off rather than run that way.
+  clientIpHeader: x-forwarded-for
+  trustedProxies:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - fc00::/7
+  # After SIGTERM: seconds of failing readiness, still serving, before every connection is
+  # closed (pages then reconnect to the new pod).
+  shutdownDelaySeconds: 5
+  logFormat: json
+  # RUST_LOG-style filter, e.g. "info" or "uploadmyshit=debug,info".
+  logLevel: info
+  # Extra arguments for the server.
+  extraArgs: []
+  # Extra environment.
+  extraEnv: []
+
+# ICE servers handed to browsers. The server hosts no STUN or TURN of its own. STUN finds
+# a direct path through most NATs; TURN relays the data when no direct path exists (some
+# corporate and mobile networks), at the TURN provider's bandwidth.
+ice:
+  stunUrls:
+    - stun:stun.cloudflare.com:3478
+    - stun:stun.l.google.com:19302
+  turn:
+    # turn:/turns: URLs of an external TURN server. Needs either username and credential
+    # (static), or secret (coturn's use-auth-secret: per-device, time-limited credentials).
+    urls: []
+    username: ""
+    credential: ""
+    secret: ""
+    # Lifetime of generated credentials: longer than the longest transfer.
+    ttlSeconds: 86400
+    # A Secret you manage instead, with any of the keys turn-username, turn-credential,
+    # turn-secret.
+    existingSecret: ""
+  # Cloudflare Realtime TURN: the server asks Cloudflare for short-lived credentials with
+  # this key and hands them out. No URLs to list; Cloudflare's come with the credentials.
+  cloudflare:
+    keyId: ""
+    apiToken: ""
+    # A Secret you manage instead, with the keys key-id and api-token.
+    existingSecret: ""
+
+# Seconds between SIGTERM and SIGKILL: the shutdown delay and a little more.
+terminationGracePeriodSeconds: 20
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  host: drop.example.com
+  # WebSockets: the page pings every 20 s, so the defaults would do, but nothing is lost by
+  # letting a quiet connection live. Add your TLS issuer beside these, for example
+  # cert-manager.io/cluster-issuer: letsencrypt. A key set to null removes a default.
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  tls:
+    # Browsers give WebRTC, folder access and clipboard only to secure pages: keep this.
+    enabled: true
+    secretName: uploadmyshit-tls
+
+podAnnotations: {}
+
+# The image runs as distroless's `nonroot` (65532) and writes nothing.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# A few MB per thousand connections.
+resources:
+  requests:
+    cpu: 20m
+    memory: 32Mi
+  limits:
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

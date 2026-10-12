@@ -1,0 +1,230 @@
+# UploadMyShit's pipeline, in the shape the group's other apps use (agent-router's): the
+# shared docker and rules templates, an image per commit, `latest` retagged on main, the
+# Helm chart published to this project's registry, and a deploy on main.
+#
+# - The template project is named by a CI/CD variable, CI_TEMPLATES_PROJECT, set on the
+#   group or the project. (A variable in `variables:` below would not work: includes are
+#   resolved before it exists.)
+# - The deploy is `helm upgrade` of charts/uploadmyshit at the commit's own image tag, not
+#   a restart of `latest`, so a rollback rolls back the binary and not just the manifest.
+# - Every commit on `dev` or `main` publishes the chart, packaged for that commit's image:
+#   `dev` to the dev channel, `main` to stable.
+#
+# Variables the pipeline reads, set in Settings -> CI/CD -> Variables:
+#   CI_TEMPLATES_PROJECT  path of the shared template project
+#   DEPLOY_TOKEN_USER, DEPLOY_TOKEN
+#                         registry login, as the shared docker templates expect
+#   UPLOADMYSHIT_VALUES   FILE variable: the chart values for this cluster -- ingress host and
+#                         class, TLS issuer, image pull secret, and the TURN configuration
+#                         (or the name of a Secret holding it). See README.md.
+#   KUBE_CONTEXT          optional; the kube context to deploy with, when the cluster
+#                         credentials offer more than one
+
+include:
+  - project: $CI_TEMPLATES_PROJECT
+    ref: main
+    file:
+      - /docker/.docker-build.gitlab-ci.yml
+      - /docker/.docker-tag.gitlab-ci.yml
+      - /docker/.docker-tools.gitlab-ci.yml
+      - /rules/.rules.gitlab-ci.yml
+
+stages:
+  - check
+  - build
+  - tag
+  - publish
+  - deploy
+
+variables:
+  # Inside the project directory, because that is the only place a cache may live. `.cargo`
+  # is ignored by git and by .dockerignore, so it never reaches an image.
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  CARGO_TERM_COLOR: always
+  DEPLOYMENT_ENV: production
+  DEPLOYMENT_NAME: uploadmyshit
+
+# A newer push cancels the older pipeline: every job is interruptible but the ones that
+# tag, publish and deploy.
+default:
+  interruptible: true
+
+# One pipeline per change: the merge request's, or the branch's when there is none, and a
+# tag's. Without this a push to a branch with an open merge request runs everything twice.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# The shared `.rules-docker-default` names `develop`. This repository's branch is `dev`.
+.rules-uploadmyshit:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "dev"
+
+# The branches that publish, and the Helm channel each publishes to.
+.rules-publish:
+  rules:
+    - if: $CI_COMMIT_BRANCH == "dev"
+      variables:
+        HELM_CHANNEL: dev
+    - if: $CI_COMMIT_BRANCH == "main"
+      variables:
+        HELM_CHANNEL: stable
+
+.cargo-cache:
+  cache:
+    key:
+      files: [Cargo.lock]
+    paths:
+      - .cargo/registry/index/
+      - .cargo/registry/cache/
+      - .cargo/git/db/
+
+# ---------------------------------------------------------------- check
+
+# The server: formatting, every lint, the unit and WebSocket tests. The page is embedded
+# in the binary, so this builds against web/ too.
+check rust:
+  stage: check
+  extends: [.rules-uploadmyshit, .cargo-cache]
+  needs: []
+  image: rust:1.98-bookworm
+  before_script:
+    - rustup component add clippy rustfmt
+  script:
+    - cargo fmt --check
+    - cargo clippy --all-targets --locked -- -D warnings
+    - cargo test --locked
+
+# The page's DOM-free modules (paths from other devices, naming, formatting) under Node's
+# own test runner, and a syntax check of every module the page loads.
+check web:
+  stage: check
+  extends: .rules-uploadmyshit
+  needs: []
+  image: node:22
+  script:
+    - for f in web/js/*.js; do node --check "$f"; done
+    - node --test 'tests/web/*.test.mjs'
+
+# Two real browsers and the real server: folders stream into a folder byte for byte, extra
+# connections open and stay correct, the download fallback hands over each file, a cancel
+# leaves nothing behind. Headless Chromium from the Playwright image; the test's
+# playwright-core is pinned to the same version.
+check e2e:
+  stage: check
+  extends: [.rules-uploadmyshit, .cargo-cache]
+  needs: []
+  image: mcr.microsoft.com/playwright:v1.64.0-noble
+  timeout: 30m
+  variables:
+    UMS_E2E_MB: "128"
+  before_script:
+    - apt-get -qq update
+    - apt-get -qq install -y curl git build-essential pkg-config
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.98.0
+    - export PATH="$CARGO_HOME/bin:$PATH"
+  script:
+    - cargo build --locked
+    - npm ci --no-audit --no-fund --prefix tests/e2e
+    - node tests/e2e/transfer.mjs
+
+check chart:
+  stage: check
+  extends: .rules-uploadmyshit
+  needs: []
+  image:
+    name: alpine/helm:4.3.0
+    entrypoint: [""]
+  script:
+    - scripts/check-chart.sh
+
+# ---------------------------------------------------------------- build
+
+# The image builds its own binary from the repository; no check gates it, what is
+# published is gated instead (publish chart needs the checks).
+build docker image:
+  extends:
+    - .docker-build
+    - .rules-uploadmyshit
+  needs: []
+
+# ---------------------------------------------------------------- tag
+
+# On `dev` too: the chart published from `dev` names this tag, not a moving one.
+tag docker image with commit:
+  stage: tag
+  interruptible: false
+  extends:
+    - .docker-setup
+    - .rules-publish
+  needs: [build docker image]
+  script:
+    - docker buildx imagetools create --tag "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" "$IMAGE_TAG"
+
+tag docker image with latest:
+  interruptible: false
+  extends:
+    - .docker-tag-latest
+    - .rules-main
+  needs: [build docker image]
+
+# ---------------------------------------------------------------- publish
+
+# The chart, packaged for the image the job above tagged, into this project's registry:
+#
+#   helm repo add uploadmyshit "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/helm/stable" \
+#     --username <user> --password <a token that can read the package registry>
+#
+# The image registry is private as well, so a cluster installing from this needs
+# imagePullSecrets, as the deploy's UPLOADMYSHIT_VALUES gives it.
+publish chart:
+  stage: publish
+  interruptible: false
+  extends: .rules-publish
+  needs: [tag docker image with commit, check rust, check web, check e2e, check chart]
+  image:
+    name: alpine/helm:4.3.0
+    entrypoint: [""]
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - PACKAGE=$(scripts/package-chart.sh "$CI_PIPELINE_IID" "$CI_COMMIT_SHA" "$CI_REGISTRY_IMAGE" chart)
+    - >-
+      curl --fail-with-body --user "gitlab-ci-token:$CI_JOB_TOKEN"
+      --form "chart=@$PACKAGE"
+      "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/helm/api/$HELM_CHANNEL/charts"
+
+# ---------------------------------------------------------------- deploy
+
+deploy to production:
+  stage: deploy
+  interruptible: false
+  # `$CI_COMMIT_BRANCH`, where the shared `.rules-main` reads `$CI_COMMIT_REF_NAME`: that is
+  # `main` too in a merge request FROM main, whose pipeline has no commit tag to need.
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  needs: [tag docker image with commit, check rust, check web, check e2e, check chart]
+  image:
+    name: alpine/helm:4.3.0
+    entrypoint: [""]
+  environment:
+    name: $DEPLOYMENT_ENV
+  script:
+    - >-
+      helm upgrade --install "$DEPLOYMENT_NAME" charts/uploadmyshit
+      --namespace "$DEPLOYMENT_ENV" --create-namespace
+      ${KUBE_CONTEXT:+--kube-context "$KUBE_CONTEXT"}
+      ${UPLOADMYSHIT_VALUES:+--values "$UPLOADMYSHIT_VALUES"}
+      --set image.repository="$CI_REGISTRY_IMAGE"
+      --set image.tag="$CI_COMMIT_SHA"
+      --wait --timeout 5m
+    # The chart's own test: the health endpoint and the page, through the Service.
+    - >-
+      helm test "$DEPLOYMENT_NAME" --namespace "$DEPLOYMENT_ENV" --logs
+      ${KUBE_CONTEXT:+--kube-context "$KUBE_CONTEXT"}
