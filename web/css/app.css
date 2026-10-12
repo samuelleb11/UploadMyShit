@@ -132,6 +132,20 @@ select {
   cursor: pointer;
 }
 
+.room-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.room-action .icon {
+  width: 18px;
+  height: 18px;
+}
+
 /* ---- stage: you in the middle, the others around ---- */
 
 .stage {
@@ -306,10 +320,39 @@ select {
 }
 
 .hint {
-  width: min(560px, calc(100% - 32px));
+  width: min(600px, calc(100% - 32px));
   margin: 4px auto 12px;
   text-align: center;
   color: var(--muted);
+}
+
+.hint p {
+  margin: 0;
+}
+
+.hint-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.hint-actions:empty {
+  display: none;
+}
+
+.link-btn {
+  border: 0;
+  background: none;
+  padding: 2px 4px;
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.link-btn:hover {
+  text-decoration: underline;
 }
 
 body.dragging .peer .avatar {
@@ -748,6 +791,22 @@ body.dragging .peer .avatar {
   }
 
   .footnote {
+    display: none;
+  }
+}
+
+/* A phone keeps the room button's words, which say what it does, and lets the room chip
+   shrink to its icon: the line under the devices says which room this is anyway. */
+@media (max-width: 420px) {
+  .topbar {
+    gap: 8px;
+  }
+
+  .chip {
+    padding: 7px 10px;
+  }
+
+  .chip span {
     display: none;
   }
 }

@@ -33,9 +33,13 @@
         <img src="/favicon.svg" alt="" width="28" height="28" />
         <span>UploadMyShit</span>
       </a>
-      <button id="room-btn" class="chip" type="button" aria-haspopup="dialog">
+      <button id="room-btn" class="chip" type="button" aria-haspopup="dialog" title="Which devices you see">
         <svg class="icon" aria-hidden="true"><use href="#i-wifi" /></svg>
         <span id="room-label">Your network</span>
+      </button>
+      <button id="room-action" class="btn primary room-action" type="button" aria-haspopup="dialog">
+        <svg class="icon" aria-hidden="true"><use href="#i-link" /></svg>
+        <span id="room-action-label">New room</span>
       </button>
       <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings" aria-haspopup="dialog">
         <svg class="icon" aria-hidden="true"><use href="#i-gear" /></svg>
@@ -52,7 +56,10 @@
           <span class="meta">You</span>
         </button>
       </div>
-      <p id="hint" class="hint"></p>
+      <div id="hint" class="hint">
+        <p id="hint-text"></p>
+        <div id="hint-actions" class="hint-actions"></div>
+      </div>
     </main>
 
     <section id="transfers" class="transfers" aria-label="Transfers" aria-live="polite"></section>
@@ -110,16 +117,19 @@
           </p>
           <div class="actions start"><button id="room-create" type="button" class="btn primary">Create a private room</button></div>
           <label class="field">
-            <span>Or join one with its code</span>
+            <span>Or join one: paste its link or type its code</span>
             <span class="row">
-              <input id="room-code" type="text" inputmode="latin" autocomplete="off" spellcheck="false" maxlength="64" placeholder="room code" />
+              <input id="room-code" type="text" inputmode="url" autocomplete="off" spellcheck="false" maxlength="256" placeholder="room code or link" />
               <button id="room-join" type="button" class="btn">Join</button>
             </span>
           </label>
         </div>
         <div id="room-private" hidden>
           <h2>Room <span id="room-code-label"></span></h2>
-          <p class="muted">Anyone with this link joins the room and can see the devices in it.</p>
+          <p class="muted">
+            Open this link on the other device, or scan the code with its camera. Anyone with the
+            link joins the room and can see the devices in it.
+          </p>
           <div class="row">
             <input id="room-link" type="text" readonly />
             <button id="room-copy" type="button" class="btn">Copy</button>

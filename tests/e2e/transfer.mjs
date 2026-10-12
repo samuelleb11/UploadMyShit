@@ -328,6 +328,27 @@ try {
     assert.ok(!('big.bin' in tree.files), 'the interrupted file did not appear');
   });
 
+  await step('a private room is created from the header and joined by pasting its link', async () => {
+    await a.locator('#room-action').click();
+    await a.waitForURL(/\/r\/[a-z2-9]{10}$/);
+    await a.waitForSelector('#room-dialog[open]');
+    const link = await a.inputValue('#room-link');
+    assert.equal(link, a.url(), 'the dialog shows the room link');
+    assert.equal(await a.textContent('#room-action-label'), 'Invite');
+    await a.locator('#room-dialog').getByRole('button', { name: 'Close' }).click();
+    // A is alone in the room now, and the page says how to bring someone in.
+    await a.waitForFunction(() => window.__ums.peers().length === 0);
+    await a.getByRole('button', { name: 'Copy link' }).waitFor();
+
+    await b.locator('#room-btn').click();
+    await b.fill('#room-code', link);
+    await b.press('#room-code', 'Enter');
+    await b.waitForURL(link);
+    await a.waitForFunction(() => window.__ums.peers().length === 1, null, { timeout: 10_000 });
+    await b.waitForFunction(() => window.__ums.peers().length === 1, null, { timeout: 10_000 });
+    assert.match(await b.textContent('#room-label'), /^Room [a-z2-9]{10}$/);
+  });
+
   await step('the server stayed healthy and saw both devices', async () => {
     const health = await (await fetch(`${url}/healthz`)).json();
     assert.equal(health.status, 'ok');

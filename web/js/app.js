@@ -263,79 +263,148 @@ function layout() {
 // The field shrinks as transfer cards appear, not only when the window resizes.
 new ResizeObserver(() => layout()).observe($('#field'));
 
+/** The line under the devices, with the buttons that fit the moment: on your own, the way
+ * to reach another device is right there rather than behind the room chip. */
 function renderHint() {
-  const hint = $('#hint');
-  if (peers.size) {
-    hint.textContent = 'Drop files or folders on a device, or click it to choose them.';
+  const text = $('#hint-text');
+  const actions = $('#hint-actions');
+  actions.replaceChildren();
+  const add = (label, onClick, cls = 'btn') => {
+    const b = el('button', cls, label);
+    b.type = 'button';
+    b.addEventListener('click', onClick);
+    actions.append(b);
+  };
+  if (room && peers.size) {
+    text.textContent = 'Drop files or folders on a device, or click it to choose them.';
+    add('Invite another device', () => openRoomDialog(), 'link-btn');
   } else if (room) {
-    hint.textContent = 'Nobody else is here yet. Share this room’s link (top) to bring another device in.';
+    text.textContent =
+      'You are in a private room. Open its link on the other device, or scan its QR code, and it appears here.';
+    add('Copy link', copyRoomLink, 'btn primary');
+    add('Show QR code', () => openRoomDialog());
+    add('Leave room', () => goToRoom(null));
+  } else if (peers.size) {
+    text.textContent = 'Drop files or folders on a device, or click it to choose them.';
+    add('Device somewhere else? Create a private room', createRoom, 'link-btn');
   } else {
-    hint.textContent =
-      'Open this page on another device on the same network and it appears here. For a device elsewhere, create a private room (top).';
+    text.textContent =
+      roomKind === 'none'
+        ? 'Create a private room, or join one, to connect with another device.'
+        : 'Devices on your network appear here on their own. To reach a device anywhere else, use a private room.';
+    add('Create a private room', createRoom, 'btn primary');
+    add('Join with a code', () => openRoomDialog(true));
   }
 }
 
 // ---- rooms -------------------------------------------------------------------------
 
+let roomKind = 'network';
+
 function renderRoom(info) {
+  roomKind = info.kind;
   const btn = $('#room-btn');
   btn.dataset.private = String(info.kind === 'private');
   btn.querySelector('use').setAttribute('href', info.kind === 'private' ? '#i-link' : '#i-wifi');
   $('#room-label').textContent =
     info.kind === 'private' ? `Room ${info.code}` : info.kind === 'network' ? 'Your network' : 'Not in a room';
-  document.title = 'UploadMyShit';
+  $('#room-action-label').textContent = info.kind === 'private' ? 'Invite' : 'New room';
+  $('#room-action').setAttribute(
+    'aria-label',
+    info.kind === 'private' ? 'Invite a device to this room' : 'Create a private room',
+  );
   updateTitle();
+  renderHint();
+}
+
+/** The room the page is about to join, shown at once rather than when the server confirms. */
+function expectRoom() {
+  renderRoom(room ? { kind: 'private', code: room } : { kind: roomKind === 'private' ? 'network' : roomKind });
 }
 
 function goToRoom(code) {
   room = code;
   history.pushState(null, '', code ? `/r/${code}` : '/');
   for (const id of [...peers.keys()]) removePeer(id);
+  expectRoom();
   signaling.restart();
 }
 
 addEventListener('popstate', () => {
   room = roomFromUrl();
+  for (const id of [...peers.keys()]) removePeer(id);
+  expectRoom();
   signaling.restart();
 });
 
-$('#room-btn').addEventListener('click', () => {
-  const dlg = $('#room-dialog');
+const roomLink = () => `${location.origin}/r/${room}`;
+
+/** A room code from what the user typed: the code itself, or a whole room link. */
+function parseRoom(input) {
+  const s = input.trim();
+  const m = s.match(/\/r\/([A-Za-z0-9_-]{4,64})\/?(?:[?#].*)?$/);
+  const code = (m ? m[1] : s).toLowerCase();
+  return /^[a-z0-9_-]{4,64}$/.test(code) ? code : null;
+}
+
+function openRoomDialog(focusJoin = false) {
   $('#room-network').hidden = Boolean(room);
   $('#room-private').hidden = !room;
   if (room) {
-    const link = `${location.origin}/r/${room}`;
     $('#room-code-label').textContent = room;
-    $('#room-link').value = link;
-    $('#room-qr').src = `/api/qr?d=${encodeURIComponent(link)}`;
+    $('#room-link').value = roomLink();
+    $('#room-qr').src = `/api/qr?d=${encodeURIComponent(roomLink())}`;
   }
-  dlg.showModal();
-});
-$('#room-create').addEventListener('click', () => {
+  const dlg = $('#room-dialog');
+  if (!dlg.open) dlg.showModal();
+  if (focusJoin && !room) $('#room-code').focus();
+}
+
+/** Opens a new private room, shows its link and QR code, and copies the link. */
+async function createRoom() {
   goToRoom(randomRoomCode());
-  $('#room-dialog').close();
-  $('#room-btn').click();
-});
-$('#room-join').addEventListener('click', () => {
-  const code = $('#room-code').value.trim().toLowerCase();
-  if (!/^[a-z0-9_-]{4,64}$/.test(code)) {
-    toast('A room code is 4 to 64 letters, digits, - or _.');
-    return;
-  }
-  goToRoom(code);
-  $('#room-dialog').close();
-});
-$('#room-copy').addEventListener('click', async () => {
+  openRoomDialog();
   try {
-    await navigator.clipboard.writeText($('#room-link').value);
+    await navigator.clipboard.writeText(roomLink());
+    toast('Private room created, link copied. Open it on the other device.');
+  } catch {
+    toast('Private room created. Open its link on the other device.');
+  }
+}
+
+async function copyRoomLink() {
+  try {
+    await navigator.clipboard.writeText(roomLink());
     toast('Link copied.');
   } catch {
+    openRoomDialog();
     $('#room-link').select();
   }
-});
-$('#room-leave').addEventListener('click', () => {
-  goToRoom(null);
+}
+
+$('#room-btn').addEventListener('click', () => openRoomDialog());
+$('#room-action').addEventListener('click', () => (room ? openRoomDialog() : createRoom()));
+$('#room-create').addEventListener('click', createRoom);
+$('#room-join').addEventListener('click', () => {
+  const code = parseRoom($('#room-code').value);
+  if (!code) {
+    toast('Paste the room’s link, or type its code (4 to 64 letters, digits, - or _).');
+    return;
+  }
+  $('#room-code').value = '';
   $('#room-dialog').close();
+  goToRoom(code);
+});
+$('#room-code').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    $('#room-join').click();
+  }
+});
+$('#room-copy').addEventListener('click', copyRoomLink);
+$('#room-leave').addEventListener('click', () => {
+  $('#room-dialog').close();
+  goToRoom(null);
 });
 
 // ---- sending -----------------------------------------------------------------------
