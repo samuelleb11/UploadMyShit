@@ -72,10 +72,36 @@ async function exists(dir, name) {
       return true;
     } catch (e) {
       if (e.name === 'TypeMismatchError') return true;
+      // A name Chrome refuses cannot be taken either; creating it falls back (see named()).
+      if (e.name === 'TypeError') return false;
       if (e.name !== 'NotFoundError') throw e;
     }
   }
   return false;
+}
+
+/** A name stripped to letters, digits and plain punctuation, with no dot or space at its ends. */
+function plainName(name) {
+  const s = name
+    .replace(/[^\p{L}\p{N} _().,'&+=@#$%!-]/gu, '_')
+    .replace(/^[.\s]+/u, (m) => '_'.repeat(m.length))
+    .replace(/[.\s]+$/u, '');
+  return s || 'file';
+}
+
+/**
+ * dir[get](name, { create: true }), and if Chrome refuses the name ("Name is not allowed":
+ * its rules are not all documented), a plain version of it, then a numbered one. One odd
+ * name must not end a transfer of many files. Resolves to [handle, the name used].
+ */
+async function named(dir, get, name, fallback) {
+  for (const candidate of [name, plainName(name), fallback]) {
+    try {
+      return [await dir[get](candidate, { create: true }), candidate];
+    } catch (e) {
+      if (e.name !== 'TypeError' || candidate === fallback) throw e;
+    }
+  }
 }
 
 /** `name`, or `name (2)`, `name (3)`... whichever is free in `dir`. */
@@ -168,7 +194,8 @@ function dirFor(path) {
     key = key ? `${key}/${seg}` : seg;
     let cached = job.dirCache.get(key);
     if (!cached) {
-      cached = promise.then((parent) => parent.getDirectoryHandle(seg, { create: true }));
+      const fallback = `folder-${job.dirCache.size + 1}`;
+      cached = promise.then(async (parent) => (await named(parent, 'getDirectoryHandle', seg, fallback))[0]);
       job.dirCache.set(key, cached);
     }
     promise = cached;
@@ -182,7 +209,11 @@ async function open(f, fi) {
     return f.fileHandle.createSyncAccessHandle();
   }
   f.dir = await dirFor(f.path);
-  f.fileHandle = await f.dir.getFileHandle(f.path.split('/').pop(), { create: true });
+  const base = f.path.split('/').pop();
+  const ext = /\.[A-Za-z0-9]{1,10}$/.exec(base)?.[0] ?? '';
+  const [handle, used] = await named(f.dir, 'getFileHandle', base, `file-${fi + 1}${ext}`);
+  f.fileHandle = handle;
+  if (used !== base) f.path = f.path.slice(0, f.path.length - base.length) + used;
   return f.fileHandle.createWritable({ keepExistingData: false });
 }
 
@@ -325,7 +356,7 @@ async function abort() {
         // Abandons the swap file, then removes the empty placeholder Chrome created under
         // the real name: nothing half-written is left in the folder.
         await h.abort();
-        await f.dir?.removeEntry(f.path.split('/').pop());
+        await f.dir?.removeEntry(f.fileHandle?.name ?? f.path.split('/').pop());
       }
     } catch {
       /* already closed */

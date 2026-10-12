@@ -2,7 +2,10 @@
 // paths another device sent into ones that are safe to write to disk.
 
 /** OS clutter nobody means to send. */
-const IGNORED = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.localized']);
+const IGNORED = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.localized', 'Icon\r']);
+
+/** OS clutter by name, or a macOS "._name" sidecar (resource fork copies on non-Mac disks). */
+const ignored = (name) => IGNORED.has(name) || name.startsWith('._');
 
 /**
  * Files and folders from a drop. Must be called synchronously inside the `drop` handler:
@@ -15,7 +18,7 @@ export function entriesFromDrop(dataTransfer) {
   const plain = [...(dataTransfer.files ?? [])];
   return (async () => {
     if (!roots.length || roots.some((r) => !r)) {
-      return { files: plain.filter((f) => !IGNORED.has(f.name)).map((file) => ({ path: file.name, file })), dirs: [] };
+      return { files: plain.filter((f) => !ignored(f.name)).map((file) => ({ path: file.name, file })), dirs: [] };
     }
     const out = { files: [], dirs: [] };
     for (const root of roots) await walk(root, out);
@@ -26,7 +29,7 @@ export function entriesFromDrop(dataTransfer) {
 /** Files from an `<input type=file>`, with folder structure when it was a folder pick. */
 export function entriesFromInput(fileList) {
   const files = [...fileList]
-    .filter((f) => !IGNORED.has(f.name))
+    .filter((f) => !ignored(f.name))
     .map((file) => ({ path: file.webkitRelativePath || file.name, file }));
   return uniquePaths({ files, dirs: [] });
 }
@@ -47,7 +50,7 @@ function readAll(reader) {
 async function walk(entry, out) {
   const path = entry.fullPath.replace(/^\/+/, '');
   if (entry.isFile) {
-    if (IGNORED.has(entry.name)) return;
+    if (ignored(entry.name)) return;
     const file = await new Promise((res, rej) => entry.file(res, rej));
     out.files.push({ path, file });
     return;
@@ -82,21 +85,32 @@ export function uniquePaths({ files, dirs }) {
   };
 }
 
-const RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i;
+/** Windows device names, with or without an extension, and two names Windows reserves. */
+const RESERVED = /^((con|prn|aux|nul|com[0-9]|lpt[0-9]|clock\$)(\..*)?|desktop\.ini|thumbs\.db)$/i;
+/** Extensions Windows acts on when a folder is opened; Chrome refuses to create them. */
+const SHELL_EXTENSIONS = /\.(lnk|local|scf|url|\{[^}]*\})$/i;
 
+/**
+ * One file or folder name, made one Chrome will create in a folder the user picked (its
+ * File System Access checks are net::IsSafePortablePathComponent): no control or format
+ * characters, none of " * / : < > ? \\ | ~, no space or dot at either end, no shell-integrated
+ * extension, no Windows reserved name. Unsafe characters become "_" rather than vanishing,
+ * so different names stay different.
+ */
 function cleanSegment(segment) {
   let s = segment
     .normalize('NFC')
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f<>:"|?*‪-‮⁦-⁩]/g, '_')
-    .replace(/[. ]+$/, '')
-    .trim();
+    .replace(/[\p{Cc}\p{Cf}"*/:<>?\\|~\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/gu, '_')
+    .replace(/^\s+|\s+$/gu, '')
+    .replace(/^\.+/, (dots) => '_'.repeat(dots.length))
+    .replace(/[.\s]+$/u, '');
   if (s.length > 200) {
     const dot = s.lastIndexOf('.');
     const ext = dot > 0 && s.length - dot <= 16 ? s.slice(dot) : '';
     s = s.slice(0, 200 - ext.length) + ext;
   }
   if (RESERVED.test(s)) s = `_${s}`;
+  if (SHELL_EXTENSIONS.test(s)) s = `${s}_`;
   return s;
 }
 
@@ -108,8 +122,10 @@ export function safePath(raw) {
   const parts = String(raw ?? '')
     .replace(/\\/g, '/')
     .split('/')
+    // "." and ".." go before cleaning, which would otherwise make them "_" and "__".
+    .filter((s) => !/^\s*\.{1,2}\s*$/.test(s))
     .map(cleanSegment)
-    .filter((s) => s && s !== '.' && s !== '..');
+    .filter(Boolean);
   return parts.slice(0, 64).join('/') || 'file';
 }
 

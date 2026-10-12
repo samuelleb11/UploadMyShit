@@ -20,6 +20,28 @@ test('paths from another device are made safe', () => {
   assert.ok(long.endsWith('.jpeg'));
 });
 
+test('names follow Chrome\'s rules for writing into a folder', () => {
+  // Each of these makes getFileHandle() throw "Name is not allowed".
+  assert.equal(safePath('Song/._guitar.ogg'), 'Song/__guitar.ogg');
+  assert.equal(safePath('.hidden'), '_hidden');
+  assert.equal(safePath('song.ini~'), 'song.ini_');
+  assert.equal(safePath('~$report.docx'), '_$report.docx');
+  assert.equal(safePath('  padded name  '), 'padded name');
+  assert.equal(safePath('ends with dot.'), 'ends with dot');
+  assert.equal(safePath('soft\u00adhyphen'), 'soft_hyphen');
+  assert.equal(safePath('c1\u0085control'), 'c1_control');
+  assert.equal(safePath('zero\u200bwidth'), 'zero_width');
+  assert.equal(safePath('shortcut.lnk'), 'shortcut.lnk_');
+  assert.equal(safePath('page.URL'), 'page.URL_');
+  assert.equal(safePath('desktop.ini'), '_desktop.ini');
+  assert.equal(safePath('Thumbs.db'), '_Thumbs.db');
+  assert.equal(safePath('CLOCK$'), '_CLOCK$');
+  assert.equal(safePath('lpt1.txt'), '_lpt1.txt');
+  // Ordinary names, accents and apostrophes included, are left alone.
+  assert.equal(safePath("Alice Cooper - School's Out/notes.mid"), "Alice Cooper - School's Out/notes.mid");
+  assert.equal(safePath('Écran de Zoë 文件.png'), 'Écran de Zoë 文件.png');
+});
+
 test('duplicate paths get numbered', () => {
   const { files, dirs } = uniquePaths({
     files: [{ path: 'a.txt' }, { path: 'A.txt' }, { path: 'dir/b' }, { path: 'dir/b' }],

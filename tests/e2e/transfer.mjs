@@ -243,10 +243,14 @@ try {
         let maxLanes = 0;
         const lanesTimer = setInterval(() => (maxLanes = Math.max(maxLanes, t.session.openLanes().length)), 200);
         const started = performance.now();
+        // A stalled transfer would wait forever; two minutes is far beyond any test's size.
         await new Promise((resolve) => {
           const check = () => t.terminal && resolve();
           t.on('state', check);
           check();
+          setTimeout(() => {
+            if (!t.terminal) t.fail(new Error('the transfer stalled (test timeout)'));
+          }, 120_000);
         });
         clearInterval(lanesTimer);
         return {
@@ -380,6 +384,35 @@ try {
   };
   const routeOf = () => a.evaluate((id) => window.__ums.sessions.get(id)?.route(), idB);
 
+  await step('names a folder refuses arrive cleaned, and the transfer completes', async () => {
+    await reconnect();
+    await b.evaluate(async () => {
+      const dest = await (await navigator.storage.getDirectory()).getDirectoryHandle('dest-names', { create: true });
+      window.__ums.setAutoAccept(() => ({ mode: 'dir', dir: dest }));
+    });
+    // Names Chrome refuses in a folder the user picked ("Name is not allowed"), and what they become.
+    const names = {
+      "Alice Cooper - School's Out/._guitar.ogg": "Alice Cooper - School's Out/__guitar.ogg",
+      "Alice Cooper - School's Out/song.ini~": "Alice Cooper - School's Out/song.ini_",
+      "Alice Cooper - School's Out/.hidden": "Alice Cooper - School's Out/_hidden",
+      "Alice Cooper - School's Out/~$lock.docx": "Alice Cooper - School's Out/_$lock.docx",
+      "Alice Cooper - School's Out/shortcut.lnk": "Alice Cooper - School's Out/shortcut.lnk_",
+      "Alice Cooper - School's Out/desktop.ini": "Alice Cooper - School's Out/_desktop.ini",
+      "Alice Cooper - School's Out/soft\u00adhyphen.txt": "Alice Cooper - School's Out/soft_hyphen.txt",
+      "Alice Cooper - School's Out/notes.mid": "Alice Cooper - School's Out/notes.mid",
+    };
+    const r = await a.evaluate(async ({ to, names }) => {
+      const files = Object.keys(names).map((path, i) => ({ path, file: new File([`file ${i}`], path.split('/').pop()) }));
+      const t = window.__ums.send(to, files, []);
+      await new Promise((resolve) => t.on('state', () => t.terminal && resolve()));
+      return { state: t.state, error: t.error };
+    }, { to: idB, names });
+    assert.equal(r.state, 'done', r.error);
+    const tree = await b.evaluate(readTree, 'dest-names');
+    for (const want of Object.values(names)) assert.ok(want in tree.files, `${want} arrived (got ${Object.keys(tree.files).join(', ')})`);
+    await b.evaluate(dropTree, 'dest-names');
+  });
+
   await step('signals left over from a closed connection do not revive it', async () => {
     // A live connection first, so there are session ids to go stale.
     await reconnect();
@@ -460,6 +493,32 @@ try {
         await b.evaluate(dropTree, 'dest-turn');
       });
     }
+
+    await step('a relay lane that swallows data is dropped and what it held is sent again', async () => {
+      await reconnect();
+      await b.evaluate(async () => {
+        const dest = await (await navigator.storage.getDirectory()).getDirectoryHandle('dest-hole', { create: true });
+        window.__ums.setAutoAccept(() => ({ mode: 'dir', dir: dest }));
+      });
+      await a.evaluate(async (to) => {
+        const t = window.__ums.send(to, [{ path: 'hello.txt', file: new File(['hi'], 'hello.txt') }], []);
+        await new Promise((resolve) => t.on('state', () => t.terminal && resolve()));
+        await window.__ums.sessions.get(to).addRelayLane();
+      }, idB);
+      // B's end of the relay lane goes silent without closing: everything sent into it is lost.
+      await b.evaluate((id) => {
+        const lane = window.__ums.sessions.get(id).relay.lanes.get(0);
+        lane.hooks.onFrame = () => {};
+      }, idA);
+      const r = await send([]);
+      assert.equal(r.state, 'done', r.error);
+      const d = await a.evaluate((id) => window.__ums.sessions.get(id).diagnostics(), idB);
+      assert.ok(!d.lanes.some((l) => l.lane === 'r0'), 'the swallowing lane was dropped');
+      console.log(`     done in ${r.seconds.toFixed(1)}s despite the dead lane`);
+      const tree = await b.evaluate(readTree, 'dest-hole');
+      for (const [path, hash] of Object.entries(hashes)) assert.equal(tree.files[path], hash, `content of ${path}`);
+      await b.evaluate(dropTree, 'dest-hole');
+    });
 
     await step('"always use the relay" sends everything through it, encrypted, byte for byte', async () => {
       await reconnect();
