@@ -236,6 +236,31 @@ async fn http_endpoints() {
     assert!(health.contains(r#""status":"ok""#));
     let index = http_get(addr, "/").await;
     assert!(index.starts_with("HTTP/1.1 200"));
+    // The page loads its scripts and styles from this build's versioned URLs, never cached
+    // itself; those URLs are cached for good, other versions never.
+    let v = uploadmyshit::web::asset_version();
+    assert!(index.contains(&format!("\"/v/{v}/js/app.js\"")), "{index}");
+    assert!(index.contains(&format!("\"/v/{v}/css/app.css\"")));
+    assert!(
+        index
+            .to_ascii_lowercase()
+            .contains("cache-control: no-cache")
+    );
+    let js = http_get(addr, &format!("/v/{v}/js/app.js")).await;
+    assert!(js.starts_with("HTTP/1.1 200"));
+    assert!(
+        js.to_ascii_lowercase()
+            .contains("cache-control: public, max-age=31536000, immutable")
+    );
+    let other = http_get(addr, "/v/0123456789ab/js/app.js").await;
+    assert!(other.starts_with("HTTP/1.1 200"));
+    assert!(
+        other
+            .to_ascii_lowercase()
+            .contains("cache-control: private, no-store")
+    );
+    let room_page = http_get(addr, "/r/some-room").await;
+    assert!(room_page.contains(&format!("\"/v/{v}/js/app.js\"")));
     assert!(
         index
             .to_ascii_lowercase()

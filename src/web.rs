@@ -10,6 +10,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::AppState;
 
@@ -19,10 +20,64 @@ use crate::AppState;
 #[folder = "web/"]
 struct Assets;
 
+/// What every page file's URL is prefixed with: `/v/<this>/`, a hash of the whole of
+/// `web/`. A change to any file makes new URLs, so a cache in front (Cloudflare rewrites
+/// `no-cache` on scripts to four hours) can never mix a new page with old scripts. A debug
+/// build reads `web/` from disk, so it hashes again each time; a release build once.
+pub fn asset_version() -> String {
+    #[cfg(debug_assertions)]
+    {
+        compute_version()
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        VERSION.get_or_init(compute_version).clone()
+    }
+}
+
+fn compute_version() -> String {
+    let mut paths: Vec<_> = Assets::iter().collect();
+    paths.sort();
+    let mut h = Sha256::new();
+    for p in paths {
+        if let Some(f) = Assets::get(&p) {
+            h.update(p.as_bytes());
+            h.update(f.metadata.sha256_hash());
+        }
+    }
+    hex(&h.finalize()[..6])
+}
+
+/// The page, with its scripts and stylesheet pointed at this version's URLs.
+fn versioned_page(html: &[u8], version: &str) -> Vec<u8> {
+    String::from_utf8_lossy(html)
+        .replace("\"/js/", &format!("\"/v/{version}/js/"))
+        .replace("\"/css/", &format!("\"/v/{version}/css/"))
+        .into_bytes()
+}
+
 /// Serves a file from `web/`. A path with no file extension that matches nothing is a
 /// page route (`/r/<code>`), and gets index.html.
+///
+/// Under `/v/<version>/` a file is the same file, cached for a year: the URL changes with
+/// the content. A version this server does not have (an old and a new pod side by side
+/// during a rollout) still gets the file, but marked never to be stored.
 pub async fn asset(uri: Uri, headers: HeaderMap) -> Response {
-    let path = uri.path().trim_start_matches('/');
+    let version = asset_version();
+    let raw = uri.path().trim_start_matches('/');
+    let (path, cache) = match raw.strip_prefix("v/") {
+        Some(rest) => {
+            let (token, inner) = rest.split_once('/').unwrap_or((rest, ""));
+            let cache = if token == version {
+                "public, max-age=31536000, immutable"
+            } else {
+                "private, no-store"
+            };
+            (inner, cache)
+        }
+        None => (raw, "no-cache"),
+    };
     let path = if path.is_empty() { "index.html" } else { path };
     let (path, file) = match Assets::get(path) {
         Some(f) => (path, f),
@@ -34,11 +89,15 @@ pub async fn asset(uri: Uri, headers: HeaderMap) -> Response {
         }
         None => return StatusCode::NOT_FOUND.into_response(),
     };
+    let page = path == "index.html";
+    // The page names this version's URLs, so it is never cached, and its ETag covers both.
+    let cache = if page { "no-cache" } else { cache };
     let hash = file.metadata.sha256_hash();
-    let etag = format!("\"{}\"", hex(&hash[..12]));
-    // No build step means no hashed file names, so every file is revalidated on each load;
-    // the ETag makes that a 304.
-    let cache = HeaderValue::from_static("no-cache");
+    let etag = if page {
+        format!("\"{}-{version}\"", hex(&hash[..8]))
+    } else {
+        format!("\"{}\"", hex(&hash[..12]))
+    };
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
@@ -48,7 +107,7 @@ pub async fn asset(uri: Uri, headers: HeaderMap) -> Response {
             StatusCode::NOT_MODIFIED,
             [
                 (header::ETAG, etag),
-                (header::CACHE_CONTROL, cache.to_str().unwrap().to_string()),
+                (header::CACHE_CONTROL, cache.to_string()),
             ],
         )
             .into_response();
@@ -62,13 +121,18 @@ pub async fn asset(uri: Uri, headers: HeaderMap) -> Response {
             .first_or_octet_stream()
             .to_string(),
     };
+    let body = if page {
+        versioned_page(&file.data, &version)
+    } else {
+        file.data.into_owned()
+    };
     (
         [
             (header::CONTENT_TYPE, mime),
             (header::ETAG, etag),
-            (header::CACHE_CONTROL, cache.to_str().unwrap().to_string()),
+            (header::CACHE_CONTROL, cache.to_string()),
         ],
-        file.data,
+        body,
     )
         .into_response()
 }
