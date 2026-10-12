@@ -2,6 +2,7 @@
 {{- $iceSecret := include "uploadmyshit.iceSecretName" . }}
 {{- $turnSecret := default $iceSecret .Values.ice.turn.existingSecret }}
 {{- $cfSecret := default $iceSecret .Values.ice.cloudflare.existingSecret }}
+{{- $relaySecret := default $iceSecret .Values.relay.existingSecret }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,7 +27,7 @@ spec:
         {{- include "uploadmyshit.selectorLabels" . | nindent 8 }}
       annotations:
         # Credentials changed inline roll the pod, which reads them only at start.
-        checksum/ice: {{ toJson .Values.ice | sha256sum }}
+        checksum/ice: {{ toJson (list .Values.ice .Values.relay) | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -102,6 +103,20 @@ spec:
                 secretKeyRef:
                   name: {{ $cfSecret }}
                   key: {{ $key }}
+                  optional: true
+            {{- end }}
+            {{- end }}
+            {{- with .Values.relay.url }}
+            - name: UMS_RELAY_URL
+              value: {{ . | quote }}
+            - name: UMS_RELAY_TTL
+              value: {{ $.Values.relay.ttlSeconds | quote }}
+            {{- if $relaySecret }}
+            - name: UMS_RELAY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $relaySecret }}
+                  key: relay-secret
                   optional: true
             {{- end }}
             {{- end }}

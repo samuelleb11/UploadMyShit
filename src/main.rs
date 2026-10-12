@@ -39,6 +39,7 @@ async fn main() -> ExitCode {
         network_rooms = state.cfg.network_rooms,
         client_ip_header = state.cfg.client_ip_header.as_deref().unwrap_or("-"),
         ice = %state.ice.describe(),
+        relay = %state.relay.as_ref().map_or("none".to_string(), |r| r.describe()),
         "listening"
     );
 

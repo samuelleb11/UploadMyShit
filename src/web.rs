@@ -90,11 +90,36 @@ fn safe_host(headers: &HeaderMap) -> Option<&str> {
 
 /// Headers every response carries. The page loads nothing from anywhere else, and its one
 /// connection is the signaling WebSocket back to this host.
-pub async fn security_headers(req: Request, next: Next) -> Response {
-    let connect = match safe_host(req.headers()) {
+/// The origin of a ws:// or wss:// URL (`wss://host:port`), when it is safe to repeat
+/// inside a Content-Security-Policy.
+pub fn ws_origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme != "ws" && scheme != "wss" {
+        return None;
+    }
+    let host = rest.split(['/', '?', '#']).next()?;
+    let ok = !host.is_empty()
+        && host.len() <= 255
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'));
+    ok.then(|| format!("{scheme}://{host}"))
+}
+
+pub async fn security_headers(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let mut connect = match safe_host(req.headers()) {
         Some(host) => format!("'self' wss://{host} ws://{host}"),
         None => "'self'".to_string(),
     };
+    // The page also connects to the relay Worker, when there is one.
+    if let Some(origin) = state.cfg.relay_url.as_deref().and_then(ws_origin) {
+        connect.push(' ');
+        connect.push_str(&origin);
+    }
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
     let csp = format!(
@@ -123,6 +148,25 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
         HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=(), usb=()"),
     );
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ws_origin;
+
+    #[test]
+    fn relay_origins() {
+        assert_eq!(
+            ws_origin("wss://relay.example.workers.dev").as_deref(),
+            Some("wss://relay.example.workers.dev")
+        );
+        assert_eq!(
+            ws_origin("ws://127.0.0.1:8787/v1/x").as_deref(),
+            Some("ws://127.0.0.1:8787")
+        );
+        assert_eq!(ws_origin("https://relay.example.com"), None);
+        assert_eq!(ws_origin("wss://bad host; script-src *"), None);
+    }
 }
 
 #[derive(Deserialize)]

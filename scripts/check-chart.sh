@@ -26,6 +26,8 @@ helm lint "$CHART" --set ice.turn.urls[0]=turn:t.example.com --set ice.turn.exis
 helm lint "$CHART" --set ice.cloudflare.keyId=k --set ice.cloudflare.apiToken=t >/dev/null
 helm lint "$CHART" --set ice.cloudflare.existingSecret=cf >/dev/null
 helm lint "$CHART" --set server.networkRooms=false >/dev/null
+helm lint "$CHART" --set relay.url=wss://relay.example.workers.dev --set relay.secret=s >/dev/null
+helm lint "$CHART" --set relay.url=wss://relay.example.workers.dev --set relay.existingSecret=relay >/dev/null
 # Rancher installs every chart with a `global` block of its own (global.cattle.*).
 helm lint "$CHART" --set global.cattle.clusterId=c-abc12 --set global.systemDefaultRegistry= >/dev/null
 
@@ -51,6 +53,10 @@ refused "a shutdown delay the grace period cuts short" --set server.shutdownDela
 refused "a client-address header with no trusted proxy" --set server.trustedProxies=null
 refused "a misspelt value" --set server.netwrokRooms=false
 refused "a second replica" --set replicaCount=2
+refused "a relay URL that is not a WebSocket" --set relay.url=https://relay.example.com
+refused "an insecure relay URL" --set relay.url=ws://relay.example.com
+refused "a relay secret without a relay" --set relay.secret=s
+refused "two relay secrets" --set relay.url=wss://r.example.com --set relay.secret=s --set relay.existingSecret=x
 
 # What the default renders: one replica, the probes, the trusted proxies, no secret.
 helm template ci "$CHART" --namespace ci > "$OUT/default.yaml"
@@ -67,6 +73,13 @@ grep -q '^kind: Secret' "$OUT/cf.yaml" || fail "no Secret for the Cloudflare key
 grep -q 'api-token: "tok"' "$OUT/cf.yaml" || fail "the Cloudflare token is not in the Secret"
 grep -q 'name: UMS_CLOUDFLARE_TURN_API_TOKEN' "$OUT/cf.yaml" || fail "the server is not given the Cloudflare token"
 ! grep -q 'value: "tok"' "$OUT/cf.yaml" || fail "the Cloudflare token is in the Deployment in the clear"
+
+# The relay secret, like the others, reaches the server only through a Secret.
+helm template ci "$CHART" --set relay.url=wss://r.example.com --set relay.secret=hush > "$OUT/relay.yaml"
+grep -q 'relay-secret: "hush"' "$OUT/relay.yaml" || fail "the relay secret is not in the Secret"
+grep -q 'name: UMS_RELAY_SECRET' "$OUT/relay.yaml" || fail "the server is not given the relay secret"
+grep -q 'value: "wss://r.example.com"' "$OUT/relay.yaml" || fail "the server is not given the relay URL"
+! grep -q 'value: "hush"' "$OUT/relay.yaml" || fail "the relay secret is in the Deployment in the clear"
 
 # What `publish chart` runs, so a packaging failure stops a merge and not a publish.
 scripts/package-chart.sh 0 "ci-check" registry.example.com/check/uploadmyshit "$OUT/pkg" >/dev/null

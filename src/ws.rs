@@ -208,6 +208,7 @@ async fn session(socket: WebSocket, state: Arc<AppState>, ip: IpAddr, admission:
         name: &name,
         room: room_info,
         ice: &ice,
+        relay: state.relay.is_some(),
         peers,
     }
     .to_json();
@@ -264,6 +265,37 @@ async fn session(socket: WebSocket, state: Arc<AppState>, ip: IpAddr, admission:
                 None => reply(ServerMsg::Error {
                     code: "bad-name",
                     message: "that name is empty",
+                }),
+            },
+            Ok(ClientMsg::Relay { to }) => match &state.relay {
+                Some(relay) => {
+                    let t = relay.mint();
+                    let theirs = ServerMsg::Relay {
+                        peer: &id,
+                        url: &t.url,
+                        session: &t.session,
+                        role: "b",
+                        exp: t.exp,
+                        sig: t.sig.as_deref(),
+                    };
+                    match state.hub.send_to(&id, &to, theirs.to_json()) {
+                        Ok(()) => reply(ServerMsg::Relay {
+                            peer: &to,
+                            url: &t.url,
+                            session: &t.session,
+                            role: "a",
+                            exp: t.exp,
+                            sig: t.sig.as_deref(),
+                        }),
+                        Err(e) => reply(ServerMsg::Error {
+                            code: e.code(),
+                            message: &e.to_string(),
+                        }),
+                    }
+                }
+                None => reply(ServerMsg::Error {
+                    code: "no-relay",
+                    message: "this server has no relay",
                 }),
             },
             Ok(ClientMsg::GetIce) => {

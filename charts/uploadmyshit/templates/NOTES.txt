@@ -26,9 +26,14 @@ Wi-Fi, and a computer): they must NOT see each other. If they do, the ingress co
 hiding client addresses (see server.clientIpHeader in values.yaml); fix that, or set
 server.networkRooms=false so only private rooms exist.
 {{- end }}
-{{- if not (or .Values.ice.turn.urls .Values.ice.cloudflare.keyId .Values.ice.cloudflare.existingSecret) }}
+{{- if .Values.relay.url }}
 
-No TURN server is configured. Most devices connect directly; a pair whose networks allow
-no direct path (some corporate and mobile networks) will fail to connect. Configure
-ice.turn or ice.cloudflare to relay for them.
+Relay: {{ .Values.relay.url }}{{ if not (or .Values.relay.secret .Values.relay.existingSecret) }}
+WARNING: no relay secret, so the server signs no tickets; set one (and the Worker's
+RELAY_SECRET) so only paired devices can use the relay.{{ end }}
+{{- else if not (or .Values.ice.turn.urls .Values.ice.cloudflare.keyId .Values.ice.cloudflare.existingSecret) }}
+
+No relay and no TURN server is configured. Most devices connect directly; a pair whose
+networks allow no direct path (some corporate and mobile networks) will fail to connect.
+Deploy the relay Worker and set relay.url, or configure ice.turn / ice.cloudflare.
 {{- end }}

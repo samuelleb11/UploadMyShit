@@ -91,6 +91,21 @@ pub struct Config {
     #[arg(long, env = "UMS_CLOUDFLARE_TURN_API_TOKEN", hide_env_values = true)]
     pub cloudflare_turn_api_token: Option<String>,
 
+    /// The relay Worker's address (worker/), e.g. `wss://relay.example.workers.dev`. Devices
+    /// that cannot connect directly relay through it, and fast transfers add lanes through
+    /// it. Unset: no relay.
+    #[arg(long, env = "UMS_RELAY_URL")]
+    pub relay_url: Option<String>,
+
+    /// The secret the relay Worker checks tickets with (its RELAY_SECRET).
+    #[arg(long, env = "UMS_RELAY_SECRET", hide_env_values = true)]
+    pub relay_secret: Option<String>,
+
+    /// Lifetime of a relay ticket, in seconds. A ticket opens connections until it expires;
+    /// connections already open stay open.
+    #[arg(long, env = "UMS_RELAY_TTL", default_value_t = 21_600)]
+    pub relay_ttl: u64,
+
     /// Seconds to keep serving after SIGTERM (readiness already failing) before closing
     /// every signaling connection, so a load balancer stops sending new ones first.
     #[arg(long, env = "UMS_SHUTDOWN_DELAY", default_value_t = 5)]
@@ -151,6 +166,19 @@ impl Config {
         }
         if self.turn_ttl < 600 {
             return Err("--turn-ttl below 600 seconds would expire mid-transfer".into());
+        }
+        if let Some(url) = &self.relay_url
+            && !(url.starts_with("wss://") || url.starts_with("ws://"))
+        {
+            return Err(format!(
+                "--relay-url {url:?} does not start with wss:// or ws://"
+            ));
+        }
+        if self.relay_secret.is_some() && self.relay_url.is_none() {
+            return Err("--relay-secret was given but --relay-url is empty".into());
+        }
+        if self.relay_ttl < 60 {
+            return Err("--relay-ttl below 60 seconds leaves no time to connect".into());
         }
         Ok(())
     }
@@ -216,5 +244,25 @@ mod tests {
     #[test]
     fn network_rooms_can_be_turned_off() {
         assert!(!parse(&["--network-rooms", "false"]).network_rooms);
+    }
+
+    #[test]
+    fn relay_settings() {
+        assert!(
+            parse(&["--relay-url=wss://relay.example.com"])
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            parse(&["--relay-url=https://relay.example.com"])
+                .validate()
+                .is_err()
+        );
+        assert!(parse(&["--relay-secret=s"]).validate().is_err());
+        assert!(
+            parse(&["--relay-url=wss://r.example.com", "--relay-ttl=10"])
+                .validate()
+                .is_err()
+        );
     }
 }

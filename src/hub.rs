@@ -237,6 +237,11 @@ impl Hub {
 
     /// Passes a signaling message to a device in the sender's room.
     pub fn relay(&self, from: &str, to: &str, data: &RawValue) -> Result<(), HubError> {
+        self.send_to(from, to, ServerMsg::Signal { from, data }.to_json())
+    }
+
+    /// Delivers a message to a device in the sender's room, and to no one else.
+    pub fn send_to(&self, from: &str, to: &str, text: String) -> Result<(), HubError> {
         let g = self.lock();
         let room = g.locations.get(from).ok_or(HubError::UnknownPeer)?;
         if from == to || g.locations.get(to) != Some(room) {
@@ -247,8 +252,7 @@ impl Hub {
             .get(room)
             .and_then(|m| m.get(to))
             .ok_or(HubError::UnknownPeer)?;
-        let text = ServerMsg::Signal { from, data }.to_json().into();
-        target.link.deliver(Outbound::Text(text));
+        target.link.deliver(Outbound::Text(text.into()));
         Ok(())
     }
 

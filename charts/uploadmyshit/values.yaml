@@ -80,6 +80,22 @@ ice:
     # A Secret you manage instead, with the keys key-id and api-token.
     existingSecret: ""
 
+# The relay Worker (worker/ in the repository, deployed to your Cloudflare account): devices
+# that cannot connect directly relay through it, and large transfers add lanes through it
+# when that is faster. Data on it is encrypted end to end. Unset url: no relay; devices that
+# cannot connect directly then need TURN (ice.turn / ice.cloudflare above) or fail.
+relay:
+  # wss://<your worker>.<your subdomain>.workers.dev
+  url: ""
+  # The secret the Worker checks tickets with: set the same value as its RELAY_SECRET.
+  secret: ""
+  # A Secret you manage instead, with the key relay-secret.
+  existingSecret: ""
+  # How long a ticket opens connections, in seconds.
+  ttlSeconds: 21600
+  # ws:// URLs are refused unless this is true: a page served over https cannot open them.
+  allowInsecure: false
+
 # Seconds between SIGTERM and SIGKILL: the shutdown delay and a little more.
 terminationGracePeriodSeconds: 20
 

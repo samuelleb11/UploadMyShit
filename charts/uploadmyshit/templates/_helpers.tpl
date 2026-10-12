@@ -45,7 +45,7 @@ are any. Empty when there are none.
 {{- define "uploadmyshit.iceSecretName" -}}
 {{- $t := .Values.ice.turn }}
 {{- $c := .Values.ice.cloudflare }}
-{{- if or $t.username $t.credential $t.secret $c.keyId $c.apiToken }}
+{{- if or $t.username $t.credential $t.secret $c.keyId $c.apiToken .Values.relay.secret }}
 {{- printf "%s-ice" (include "uploadmyshit.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 {{- end }}
@@ -98,6 +98,21 @@ less clearly.
 {{- end }}
 {{- if and .Values.server.clientIpHeader (not .Values.server.trustedProxies) }}
 {{- fail "server.clientIpHeader is only read from server.trustedProxies; list at least one" }}
+{{- end }}
+{{- $r := .Values.relay }}
+{{- if $r.url }}
+{{- if not (or (hasPrefix "wss://" $r.url) (and $r.allowInsecure (hasPrefix "ws://" $r.url))) }}
+{{- fail (printf "relay.url %q must start with wss:// (ws:// only with relay.allowInsecure)" $r.url) }}
+{{- end }}
+{{- end }}
+{{- if and (or $r.secret $r.existingSecret) (not $r.url) }}
+{{- fail "relay: a secret was given but relay.url is empty" }}
+{{- end }}
+{{- if and $r.secret $r.existingSecret }}
+{{- fail "relay: give either secret or existingSecret, not both" }}
+{{- end }}
+{{- if lt (int64 $r.ttlSeconds) 60 }}
+{{- fail "relay.ttlSeconds below 60 leaves no time to connect" }}
 {{- end }}
 {{- if ge (add (int64 .Values.server.shutdownDelaySeconds) 2) (int64 .Values.terminationGracePeriodSeconds) }}
 {{- fail (printf "server.shutdownDelaySeconds (%d) and 2 s to close connections must end before terminationGracePeriodSeconds (%d)" (int64 .Values.server.shutdownDelaySeconds) (int64 .Values.terminationGracePeriodSeconds)) }}

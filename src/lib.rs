@@ -7,6 +7,7 @@ pub mod ice;
 pub mod ip;
 pub mod names;
 pub mod protocol;
+pub mod relay;
 pub mod web;
 pub mod ws;
 
@@ -21,6 +22,7 @@ use crate::config::Config;
 use crate::hub::Hub;
 use crate::ice::IceProvider;
 use crate::ip::ClientIpPolicy;
+use crate::relay::Relay;
 
 /// `<crate version>+<git commit>`, or `+unknown` when built outside a checkout.
 pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("UMS_BUILD_SHA"));
@@ -29,6 +31,7 @@ pub struct AppState {
     pub cfg: Config,
     pub hub: Arc<Hub>,
     pub ice: IceProvider,
+    pub relay: Option<Relay>,
     pub ip_policy: ClientIpPolicy,
     /// Set once shutdown starts: readiness fails and new connections are refused.
     pub draining: AtomicBool,
@@ -42,6 +45,7 @@ impl AppState {
             cfg.max_connections_per_ip,
         ));
         let ice = IceProvider::from_config(&cfg);
+        let relay = Relay::from_config(&cfg);
         let ip_policy = ClientIpPolicy {
             header: cfg
                 .client_ip_header
@@ -53,6 +57,7 @@ impl AppState {
             cfg,
             hub,
             ice,
+            relay,
             ip_policy,
             draining: AtomicBool::new(false),
         })
@@ -66,6 +71,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/readyz", get(web::readyz))
         .route("/api/qr", get(web::qr))
         .fallback(web::asset)
-        .layer(middleware::from_fn(web::security_headers))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            web::security_headers,
+        ))
         .with_state(state)
 }

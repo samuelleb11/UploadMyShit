@@ -66,6 +66,17 @@
         }
       }
     },
+    "relay": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string" },
+        "secret": { "type": "string" },
+        "existingSecret": { "type": "string" },
+        "ttlSeconds": { "type": "integer", "minimum": 60 },
+        "allowInsecure": { "type": "boolean" }
+      }
+    },
     "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 },
     "service": {
       "type": "object",

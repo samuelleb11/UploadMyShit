@@ -32,6 +32,10 @@ pub enum ClientMsg {
     },
     /// Fresh ICE servers, for TURN credentials close to expiring.
     GetIce,
+    /// A relay session with one other device in the same room: both get a ticket.
+    Relay {
+        to: String,
+    },
     /// Keep-alive. Browsers cannot see WebSocket pings, so the page sends its own.
     Ping,
 }
@@ -69,6 +73,9 @@ impl ClientMsg {
                 name: f.name.clone().ok_or_else(|| missing("name"))?,
             },
             "get-ice" => ClientMsg::GetIce,
+            "relay" => ClientMsg::Relay {
+                to: f.to.clone().ok_or_else(|| missing("to"))?,
+            },
             "ping" => ClientMsg::Ping,
             other => return Err(format!("unknown message type {other:?}")),
         })
@@ -113,6 +120,8 @@ pub enum ServerMsg<'a> {
         name: &'a str,
         room: RoomInfo,
         ice: &'a IceConfig,
+        /// Whether a relay Worker is configured (tickets are asked for with `relay`).
+        relay: bool,
         peers: Vec<PeerInfo>,
     },
     PeerJoined {
@@ -130,6 +139,17 @@ pub enum ServerMsg<'a> {
     },
     Ice {
         ice: &'a IceConfig,
+    },
+    /// A relay session with `peer`: connect to `<url>/v1/<session>/<role>/<lane>?exp=&sig=`.
+    /// The other device gets the same session with the other role.
+    Relay {
+        peer: &'a str,
+        url: &'a str,
+        session: &'a str,
+        role: &'a str,
+        exp: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sig: Option<&'a str>,
     },
     Pong,
     Error {
@@ -174,6 +194,11 @@ mod tests {
             ClientMsg::GetIce
         ));
         assert!(ClientMsg::parse(r#"{"t":"nope"}"#).is_err());
+        assert!(matches!(
+            ClientMsg::parse(r#"{"t":"relay","to":"p2"}"#).unwrap(),
+            ClientMsg::Relay { ref to } if to == "p2"
+        ));
+        assert!(ClientMsg::parse(r#"{"t":"relay"}"#).is_err());
         assert!(ClientMsg::parse(r#"{"t":"signal","to":"p1"}"#).is_err());
         assert!(ClientMsg::parse(r#"{"t":"hello"}"#).is_err());
         assert!(ClientMsg::parse("not json").is_err());

@@ -296,3 +296,49 @@ async fn cloudflare_turn_credentials_live() {
     );
     assert!(wa["ice"]["expiresAt"].as_u64().unwrap() > 0);
 }
+
+#[tokio::test]
+async fn relay_tickets_go_to_both_devices_and_no_one_else() {
+    let addr = start(&["--relay-url=wss://relay.example.com", "--relay-secret=k"]).await;
+    let (mut a, wa) = hello(addr, "secret-a-0123456789", None, "A").await;
+    assert_eq!(wa["relay"], true);
+    let (mut b, wb) = hello(addr, "secret-b-0123456789", None, "B").await;
+    assert_eq!(recv(&mut a).await["t"], "peer-joined");
+    let b_id = wb["id"].as_str().unwrap();
+
+    send(&mut a, json!({"t": "relay", "to": b_id})).await;
+    let ta = recv(&mut a).await;
+    let tb = recv(&mut b).await;
+    assert_eq!(ta["t"], "relay");
+    assert_eq!(tb["t"], "relay");
+    assert_eq!(ta["session"], tb["session"]);
+    assert_eq!(
+        (ta["role"].as_str(), tb["role"].as_str()),
+        (Some("a"), Some("b"))
+    );
+    assert_eq!(ta["peer"], b_id);
+    assert_eq!(tb["peer"], wa["id"]);
+    assert_eq!(ta["url"], "wss://relay.example.com");
+    let session = ta["session"].as_str().unwrap();
+    let exp = ta["exp"].as_u64().unwrap();
+    assert_eq!(
+        ta["sig"].as_str().unwrap(),
+        uploadmyshit::relay::sign("k", session, exp)
+    );
+
+    // A device in another room cannot be reached.
+    let (_c, wc) = hello(addr, "secret-c-0123456789", Some("elsewhere"), "C").await;
+    send(&mut a, json!({"t": "relay", "to": wc["id"]})).await;
+    assert_eq!(recv(&mut a).await["code"], "unknown-peer");
+}
+
+#[tokio::test]
+async fn without_a_relay_the_server_says_so() {
+    let addr = start(&[]).await;
+    let (mut a, wa) = hello(addr, "secret-a-0123456789", None, "A").await;
+    assert_eq!(wa["relay"], false);
+    let (_b, wb) = hello(addr, "secret-b-0123456789", None, "B").await;
+    recv(&mut a).await; // peer-joined
+    send(&mut a, json!({"t": "relay", "to": wb["id"]})).await;
+    assert_eq!(recv(&mut a).await["code"], "no-relay");
+}
