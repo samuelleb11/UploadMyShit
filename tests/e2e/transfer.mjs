@@ -585,6 +585,27 @@ try {
     assert.match(await b.textContent('#room-label'), /^Room [a-z2-9]{10}$/);
   });
 
+  await step('a tab left open across a deploy reloads itself, once', async () => {
+    // A third tab whose server, by its welcome, now has newer page files than it runs.
+    const c = await browsers[0].newPage();
+    await c.routeWebSocket(/\/ws$/, (ws) => {
+      const server = ws.connectToServer();
+      server.onMessage((msg) => {
+        const m = JSON.parse(msg);
+        if (m.t === 'welcome') m.assets = 'ffffffffffff';
+        ws.send(JSON.stringify(m));
+      });
+    });
+    let loads = 0;
+    c.on('load', () => loads++);
+    await c.goto(url);
+    await c.waitForFunction(() => sessionStorage.getItem('ums.reloadedFor') === 'ffffffffffff', null, { timeout: 10_000 });
+    await c.waitForLoadState('load');
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(loads, 2, `loaded ${loads} times: once, then one reload`);
+    await c.close();
+  });
+
   await step('the server stayed healthy and saw both devices', async () => {
     const health = await (await fetch(`${url}/healthz`)).json();
     assert.equal(health.status, 'ok');

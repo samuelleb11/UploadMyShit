@@ -124,6 +124,9 @@ pub enum ServerMsg<'a> {
     Welcome {
         protocol: u32,
         version: &'a str,
+        /// The page's current asset version (web::asset_version): a tab whose scripts came
+        /// from another one is out of date and reloads.
+        assets: &'a str,
         id: &'a str,
         name: &'a str,
         room: RoomInfo,

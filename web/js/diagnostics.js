@@ -116,10 +116,11 @@ export async function collectReport(ctx) {
   } catch {
     /* not offered */
   }
-  const { me, room, version, ice, relay, signalingState, sessions, peers, transfers, settings, lastNetworkTest } = ctx();
+  const { me, room, version, page, ice, relay, signalingState, sessions, peers, transfers, settings, lastNetworkTest } = ctx();
   return {
     at: new Date().toISOString(),
     version,
+    page,
     browser: navigator.userAgent,
     features: {
       folderAccess: 'showDirectoryPicker' in window,
@@ -183,7 +184,7 @@ export function initDiagnostics(ctx, onSetting) {
     const parts = [];
     parts.push(
       section('This browser', [
-        ['Version', r.version ?? '–'],
+        ['Version', `server ${r.version ?? '–'}, page ${r.page ?? '–'}`],
         ['Save into a folder', r.features.folderAccess ? 'yes' : 'no (files download one by one)'],
         ['Browser storage', r.storage ? `${formatBytes(r.storage.usage)} used of ${formatBytes(r.storage.quota)}` : '–'],
       ]),

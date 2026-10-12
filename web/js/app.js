@@ -66,6 +66,9 @@ function tabSecret(renew = false) {
 }
 
 const device = describeDevice();
+
+/** This page's scripts' version: the /v/<version>/ they were loaded from. */
+const PAGE_VERSION = new URL(import.meta.url).pathname.match(/^\/v\/([0-9a-f]+)\//)?.[1] ?? null;
 const limiter = new TokenBucket(settings.limitMBps * 1e6);
 
 function roomFromUrl() {
@@ -108,12 +111,16 @@ signaling.on('welcome', (m) => {
   relayAvailable = Boolean(m.relay);
   roomInfo = m.room;
   serverVersion = m.version;
+  if (PAGE_VERSION && m.assets && m.assets !== PAGE_VERSION) updateReady(m.assets);
   if (!settings.name) {
     settings.name = m.name;
     saveSettings();
   }
   $('#me-name').textContent = m.name;
-  $('#version').textContent = `v${m.version}`;
+  // The server's version and the page's own: after a deploy a tab can run older scripts
+  // than the server it talks to, until it reloads.
+  const stale = PAGE_VERSION && m.assets && m.assets !== PAGE_VERSION;
+  $('#version').textContent = `v${m.version} · page ${PAGE_VERSION ?? 'dev'}${stale ? ' (update ready)' : ''}`;
   for (const id of [...peers.keys()]) removePeer(id);
   for (const p of m.peers) addPeer(p);
   renderRoom(m.room);
@@ -766,6 +773,7 @@ function addTransfer(t, peerId) {
     renderTransfer(entry);
     renderPeer(peerId);
     keepAwake();
+    if (t.terminal) setTimeout(reloadIfIdle, 1500);
     if (t.state === 'done' && t.direction === 'in' && t.mode === 'dir') {
       toast(`Saved ${t.count === 1 ? t.files[0].path.split('/').pop() : `${t.count} files`} to ${t.destination}.`);
     }
@@ -899,6 +907,7 @@ const diagnostics = initDiagnostics(
     me,
     room: roomInfo ? (roomInfo.kind === 'private' ? `private (${roomInfo.code})` : roomInfo.kind) : '–',
     version: serverVersion,
+    page: PAGE_VERSION,
     ice,
     relay: relayAvailable,
     signalingState: signaling.state,
@@ -925,12 +934,50 @@ $('#set-dest-change').addEventListener('click', async () => {
   }
 });
 
+// ---- staying current ---------------------------------------------------------------
+
+/**
+ * The server has newer scripts than this tab is running (it was open across a deploy).
+ * Reload now if nothing is under way, otherwise as soon as it is. At most once per version,
+ * so a cache that keeps serving an old page cannot make it reload forever.
+ */
+let pendingUpdate = null;
+
+function updateReady(version) {
+  if (pendingUpdate === version) return;
+  let tried = null;
+  try {
+    tried = sessionStorage.getItem('ums.reloadedFor');
+  } catch {
+    /* storage unavailable */
+  }
+  if (tried === version) return;
+  pendingUpdate = version;
+  if (!reloadIfIdle()) notice('An update is ready. This page reloads once your transfers finish.');
+}
+
+function reloadIfIdle() {
+  if (!pendingUpdate || activeCount() > 0 || offerQueue.length > 0) return false;
+  try {
+    sessionStorage.setItem('ums.reloadedFor', pendingUpdate);
+  } catch {
+    /* storage unavailable: reload anyway */
+  }
+  location.reload();
+  return true;
+}
+
 // ---- toasts ------------------------------------------------------------------------
 
 function toast(text) {
   const t = el('div', 'toast', text);
   $('#toasts').append(t);
   setTimeout(() => t.remove(), 4500);
+}
+
+/** A toast that stays. */
+function notice(text) {
+  $('#toasts').append(el('div', 'toast', text));
 }
 
 // ---- start -------------------------------------------------------------------------

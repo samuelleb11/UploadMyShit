@@ -209,9 +209,11 @@ async fn session(socket: WebSocket, state: Arc<AppState>, ip: IpAddr, admission:
         Err(e) => return refuse(sink, e.code(), &e.to_string()).await,
     };
     let ice = state.ice.config(&id).await;
+    let assets = crate::web::asset_version();
     let welcome = ServerMsg::Welcome {
         protocol: PROTOCOL_VERSION,
         version: crate::VERSION,
+        assets: &assets,
         id: &id,
         name: &name,
         room: room_info,

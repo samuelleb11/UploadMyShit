@@ -76,6 +76,7 @@ async fn devices_on_one_network_find_each_other_and_signal() {
     let (mut a, wa) = hello(addr, "secret-a-0123456789", None, "Alpha").await;
     assert_eq!(wa["room"]["kind"], "network");
     assert_eq!(wa["peers"], json!([]));
+    assert_eq!(wa["assets"], uploadmyshit::web::asset_version().as_str());
     assert_eq!(
         wa["ice"]["iceServers"][0]["urls"][0],
         "stun:stun.cloudflare.com:3478"
