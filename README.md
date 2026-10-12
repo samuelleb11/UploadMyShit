@@ -131,7 +131,7 @@ Every flag has an environment variable. Run `uploadmyshit --help` for the full l
 | --- | --- | --- |
 | `UMS_BIND` | `0.0.0.0:8080` | Listen address |
 | `UMS_NETWORK_ROOMS` | `true` | Automatic rooms by public address. `false`: private rooms only |
-| `UMS_CLIENT_IP_HEADER` | – | e.g. `x-forwarded-for`; read only from `UMS_TRUSTED_PROXIES` |
+| `UMS_CLIENT_IP_HEADER` | – | e.g. `x-forwarded-for`, or `cf-connecting-ip` behind Cloudflare (proxied or a Tunnel); read only from `UMS_TRUSTED_PROXIES` |
 | `UMS_TRUSTED_PROXIES` | – | CIDRs of the proxies in front, comma-separated |
 | `UMS_IPV4_PREFIX` / `UMS_IPV6_PREFIX` | `32` / `64` | What makes up one network room |
 | `UMS_MAX_ROOM_PEERS` | `50` | |

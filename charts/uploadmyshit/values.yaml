@@ -35,6 +35,11 @@ server:
   # ingress-nginx: its Service with externalTrafficPolicy: Local, or the PROXY protocol
   # from the load balancer). If every visitor arrives as the same address, every visitor
   # lands in one network room: turn networkRooms off rather than run that way.
+  #
+  # Behind Cloudflare (proxied DNS or a Cloudflare Tunnel), use cf-connecting-ip: proxies
+  # after Cloudflare often rewrite X-Forwarded-For to their own address. The server notices
+  # that case (Cloudflare's header disagrees) and keeps visitors out of network rooms, with
+  # a warning in its log, rather than put strangers together.
   clientIpHeader: x-forwarded-for
   trustedProxies:
     - 10.0.0.0/8

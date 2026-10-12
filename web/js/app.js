@@ -411,9 +411,9 @@ function renderHint() {
     add('Device somewhere else? Create a private room', createRoom, 'link-btn');
   } else {
     text.textContent =
-      roomKind === 'none'
-        ? 'Create a private room, or join one, to connect with another device.'
-        : 'Devices on your network appear here on their own. To reach a device anywhere else, use a private room.';
+      roomKind === 'network'
+        ? 'Devices on your network appear here on their own. To reach a device anywhere else, use a private room.'
+        : 'Create a private room, or join one, to connect with another device.';
     add('Create a private room', createRoom, 'btn primary');
     add('Join with a code', () => openRoomDialog(true));
   }

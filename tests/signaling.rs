@@ -213,6 +213,77 @@ async fn without_network_rooms_a_device_is_alone_until_it_joins_one() {
     assert_eq!(wb["peers"], json!([]));
 }
 
+/// A device arriving through a proxy chain like Cloudflare's: `forwarded` is the
+/// X-Forwarded-For the last proxy sent, `cloudflare` the CF-Connecting-IP.
+async fn hello_via(
+    addr: SocketAddr,
+    secret: &str,
+    forwarded: &str,
+    cloudflare: &str,
+) -> (Ws, Value) {
+    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("x-forwarded-for", forwarded.parse().unwrap());
+    req.headers_mut()
+        .insert("cf-connecting-ip", cloudflare.parse().unwrap());
+    let mut ws = connect_async(req).await.unwrap().0;
+    send(
+        &mut ws,
+        json!({"t": "hello", "secret": secret, "device": {"kind": "desktop", "os": "macOS", "browser": "Chrome"}}),
+    )
+    .await;
+    let welcome = recv(&mut ws).await;
+    assert_eq!(welcome["t"], "welcome", "{welcome}");
+    (ws, welcome)
+}
+
+#[tokio::test]
+async fn a_proxy_hiding_visitors_never_makes_a_lobby_of_strangers() {
+    // Cloudflare Tunnel, then an ingress that rewrote X-Forwarded-For to the tunnel's pod:
+    // every visitor arrives as 10.42.0.9, and only Cloudflare's header still tells them apart.
+    let addr = start(&[
+        "--client-ip-header",
+        "x-forwarded-for",
+        "--trusted-proxies",
+        "127.0.0.0/8,10.0.0.0/8",
+    ])
+    .await;
+    let (_a, wa) = hello_via(addr, "secret-a-0123456789", "10.42.0.9", "198.51.100.7").await;
+    let (_b, wb) = hello_via(addr, "secret-b-0123456789", "10.42.0.9", "203.0.113.9").await;
+    assert_eq!(wa["room"]["kind"], "address-unknown");
+    assert_eq!(wb["room"]["kind"], "address-unknown");
+    assert_eq!(wb["peers"], json!([]), "strangers never see each other");
+    // A private room still works.
+    let (_c, _) = hello(addr, "secret-c-0123456789", Some("ourroom"), "C").await;
+    let (_d, wd) = hello(addr, "secret-d-0123456789", Some("ourroom"), "D").await;
+    assert_eq!(wd["peers"].as_array().unwrap().len(), 1);
+
+    // Reading Cloudflare's header: each network gets its own room again.
+    let addr = start(&[
+        "--client-ip-header",
+        "cf-connecting-ip",
+        "--trusted-proxies",
+        "127.0.0.0/8,10.0.0.0/8",
+    ])
+    .await;
+    let (_a, wa) = hello_via(addr, "secret-a-0123456789", "10.42.0.9", "198.51.100.7").await;
+    let (_b, wb) = hello_via(addr, "secret-b-0123456789", "10.42.0.9", "203.0.113.9").await;
+    let (_c, wc) = hello_via(addr, "secret-c-0123456789", "10.42.0.9", "198.51.100.7").await;
+    assert_eq!(wa["room"]["kind"], "network");
+    assert_eq!(wb["peers"], json!([]), "another network sees no one");
+    let seen: Vec<&str> = wc["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        seen,
+        vec![wa["id"].as_str().unwrap()],
+        "the same network finds itself"
+    );
+}
+
 #[tokio::test]
 async fn cross_origin_pages_are_refused() {
     let addr = start(&[]).await;

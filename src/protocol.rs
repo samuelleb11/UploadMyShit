@@ -124,6 +124,9 @@ pub enum RoomInfo {
     Private { code: String },
     /// Network rooms are turned off and no code was given: alone until joining one.
     None,
+    /// Network rooms are on, but this visitor's address cannot be told apart from others' (a
+    /// proxy in front hides it, see ip::address_known): alone rather than with strangers.
+    AddressUnknown,
 }
 
 #[derive(Debug, Serialize)]

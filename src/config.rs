@@ -16,7 +16,8 @@ pub struct Config {
     pub bind: SocketAddr,
 
     /// Header that carries the visitor's address when the TCP peer is a trusted proxy,
-    /// e.g. `x-forwarded-for` or `x-real-ip`. Unset: the TCP peer address is the visitor.
+    /// e.g. `x-forwarded-for` or `x-real-ip`; behind Cloudflare (proxied or a Tunnel),
+    /// `cf-connecting-ip`. Unset: the TCP peer address is the visitor.
     #[arg(long, env = "UMS_CLIENT_IP_HEADER")]
     pub client_ip_header: Option<String>,
 

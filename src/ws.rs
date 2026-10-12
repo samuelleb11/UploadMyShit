@@ -3,7 +3,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
@@ -48,13 +48,14 @@ pub async fn handler(
         return (StatusCode::FORBIDDEN, "cross-origin connection refused").into_response();
     }
     let ip = state.ip_policy.client_ip(peer, &headers);
+    let known = ip::address_known(ip, &headers);
     let admission = match state.hub.admit(ip) {
         Ok(a) => a,
         Err(e) => return (StatusCode::TOO_MANY_REQUESTS, e.to_string()).into_response(),
     };
     ws.max_message_size(MAX_FRAME)
         .max_frame_size(MAX_FRAME)
-        .on_upgrade(move |socket| session(socket, state, ip, admission))
+        .on_upgrade(move |socket| session(socket, state, ip, known, admission))
 }
 
 /// A browser always sends Origin on a WebSocket. Refusing other sites' pages keeps one from
@@ -84,6 +85,21 @@ fn opaque_id(s: &str) -> bool {
         && s.len() <= 32
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Once per process: the deployment hides visitors' addresses, so network rooms cannot work
+/// until it is fixed. `proxy` is the address the server sees instead, never a visitor's.
+fn warn_address_unknown(proxy: IpAddr) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            %proxy,
+            "visitors come through Cloudflare, but the address worked out for them is {proxy}, \
+             not the one Cloudflare saw: a proxy in between hides it. Network rooms stay off \
+             (they would put strangers together) until --client-ip-header is set to \
+             cf-connecting-ip (chart: server.clientIpHeader)"
+        );
+    }
 }
 
 fn valid_secret(s: &str) -> bool {
@@ -147,7 +163,15 @@ async fn refuse(mut sink: Sink, code: &str, message: &str) {
         .await;
 }
 
-async fn session(socket: WebSocket, state: Arc<AppState>, ip: IpAddr, admission: Admission) {
+/// `known`: whether `ip` is the visitor's own address (ip::address_known), so it can key a
+/// network room.
+async fn session(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    ip: IpAddr,
+    known: bool,
+    admission: Admission,
+) {
     let (sink, mut stream) = socket.split();
     let hello = match timeout(HELLO_TIMEOUT, next_text(&mut stream)).await {
         Ok(Some(t)) => t,
@@ -177,10 +201,14 @@ async fn session(socket: WebSocket, state: Arc<AppState>, ip: IpAddr, admission:
             Some(code) => (format!("room:{code}"), RoomInfo::Private { code }),
             None => return refuse(sink, "bad-room", "a room code is 4 to 64 of a-z 0-9 - _").await,
         },
-        None if state.cfg.network_rooms => (
+        None if state.cfg.network_rooms && known => (
             ip::network_room_key(ip, state.cfg.ipv4_prefix, state.cfg.ipv6_prefix),
             RoomInfo::Network,
         ),
+        None if state.cfg.network_rooms => {
+            warn_address_unknown(ip);
+            (format!("solo:{id}"), RoomInfo::AddressUnknown)
+        }
         None => (format!("solo:{id}"), RoomInfo::None),
     };
     let name = name

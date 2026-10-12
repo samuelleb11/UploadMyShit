@@ -135,6 +135,28 @@ impl ClientIpPolicy {
     }
 }
 
+/// The header Cloudflare adds to every request it passes on, proxied or through a Cloudflare
+/// Tunnel: the address it saw the visitor connect from. Proxies after it leave it alone.
+pub const CLOUDFLARE_HEADER: &str = "cf-connecting-ip";
+
+/// Whether `ip`, the visitor's address as client_ip worked it out, can be told apart from
+/// other visitors' and so key a network room. Not when the request came through Cloudflare
+/// and Cloudflare saw another address: then `ip` is a proxy's in between (the one that
+/// rewrote X-Forwarded-For, say), every visitor arrives as it, and a network room keyed on
+/// it would put strangers from everywhere together.
+pub fn address_known(ip: IpAddr, headers: &HeaderMap) -> bool {
+    let mut seen = headers.get_all(CLOUDFLARE_HEADER).iter().peekable();
+    if seen.peek().is_none() {
+        return true;
+    }
+    seen.all(|v| {
+        v.to_str()
+            .ok()
+            .and_then(|v| v.trim().parse::<IpAddr>().ok())
+            .is_some_and(|cf| canonical(cf) == canonical(ip))
+    })
+}
+
 /// One X-Forwarded-For entry: a bare address, or one with a port (`1.2.3.4:5678`,
 /// `[2001:db8::1]:443`), which some proxies write.
 fn parse_forwarded_entry(entry: &str) -> Option<IpAddr> {
@@ -249,6 +271,45 @@ mod tests {
         assert_eq!(
             p.client_ip(sock("10.0.0.2:80"), &HeaderMap::new()),
             "10.0.0.2".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn an_address_cloudflare_did_not_see_is_unknown() {
+        let ip: IpAddr = "198.51.100.7".parse().unwrap();
+        // Not through Cloudflare: nothing to compare with.
+        assert!(address_known(ip, &HeaderMap::new()));
+        assert!(address_known(
+            ip,
+            &headers("cf-connecting-ip", &["198.51.100.7"])
+        ));
+        assert!(address_known(
+            "::ffff:198.51.100.7".parse().unwrap(),
+            &headers("cf-connecting-ip", &["198.51.100.7"])
+        ));
+        // X-Forwarded-For was rewritten by a proxy on the way: its address, not the visitor's.
+        let proxy: IpAddr = "10.42.0.9".parse().unwrap();
+        assert!(!address_known(
+            proxy,
+            &headers("cf-connecting-ip", &["198.51.100.7"])
+        ));
+        assert!(!address_known(
+            ip,
+            &headers("cf-connecting-ip", &["garbage"])
+        ));
+        assert!(!address_known(
+            ip,
+            &headers("cf-connecting-ip", &["198.51.100.7", "203.0.113.9"])
+        ));
+    }
+
+    #[test]
+    fn cloudflare_header_names_the_visitor_behind_trusted_proxies() {
+        let p = policy(CLOUDFLARE_HEADER, &["10.0.0.0/8"]);
+        let h = headers("cf-connecting-ip", &["2001:db8:1:2::10"]);
+        assert_eq!(
+            p.client_ip(sock("10.42.0.5:80"), &h),
+            "2001:db8:1:2::10".parse::<IpAddr>().unwrap()
         );
     }
 
