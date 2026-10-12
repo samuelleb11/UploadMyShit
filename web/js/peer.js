@@ -1,31 +1,75 @@
-// One other device: the WebRTC connections to it and the transfers in both directions.
+// One other device: the connections to it and the transfers in both directions.
 //
-// The first connection is negotiated through the signaling server ("perfect negotiation":
-// either side may start, and a collision resolves itself). It carries the `ctl` channel and
-// a data lane. Further connections, opened while a large transfer benefits from them, are
-// negotiated over `ctl` itself, browser to browser, so the server sees only the first.
-// Every channel is pre-negotiated (fixed ids on both sides), so neither side waits for the
-// other to announce one.
+// Two ways to reach it, used together when both help:
+//
+// - WebRTC, browser to browser. The first connection is negotiated through the signaling
+//   server ("perfect negotiation": either side may start, and a collision resolves itself);
+//   it carries the `ctl` channel and a data lane. Extra connections, opened while a large
+//   transfer benefits from them, are negotiated over `ctl` itself. Every channel is
+//   pre-negotiated (fixed ids on both sides), so neither side waits for the other to
+//   announce one.
+// - The relay Worker (relay.js): WebSocket lanes, encrypted end to end. Used when no direct
+//   connection opens within a few seconds, and added beside a direct one while a transfer is
+//   limited by its lanes and the relay raises the rate.
+//
+// Control messages go over WebRTC while it is direct, over the relay otherwise. Every lane,
+// of either kind, has the same face for the transfer code: send(), buffered, ready, and a
+// measured drain rate the sender uses to keep each lane's queue about as deep as it drains
+// in under a second.
 
 import { Emitter, deferred, withTimeout } from './util.js';
-import { HDR, LANE_LOW, IncomingTransfer, OutgoingTransfer } from './transfer.js';
+import { HDR, LANE_HIGH, LANE_LOW, IncomingTransfer, OutgoingTransfer } from './transfer.js';
+import { RelayLane, T_CTL, ctlText, deriveKey, makeKeyPair } from './relay.js';
 
 const CTL_ID = 0;
 const DATA_ID = 1;
 const CTL_FRAGMENT = 16_000;
 const CTL_HIGH = 1 << 20;
 const CONNECT_TIMEOUT = 25_000;
-/** Most connections to one device, whatever the settings say. */
+/** How long a direct connection may take before the relay is asked for. */
+const FALLBACK_AFTER = 4_000;
+const PATH_EVERY = 2_000;
+const SAMPLE_EVERY = 250;
+/** Most WebRTC connections to one device, whatever the settings say. */
 export const MAX_LINKS = 8;
 const AUTO_LINKS = 4;
+export const MAX_RELAY_LANES = 4;
+
+/** A WebRTC data channel as a lane. */
+class RtcLane {
+  constructor(lid, pc, dc) {
+    this.lid = lid;
+    this.kind = 'rtc';
+    this.pc = pc;
+    this.dc = dc;
+    this.open = false;
+    this.opened = deferred();
+    this.pendingCands = [];
+    this.sentTotal = 0;
+  }
+
+  get ready() {
+    return this.open && this.dc.readyState === 'open';
+  }
+
+  get buffered() {
+    return this.dc.bufferedAmount;
+  }
+
+  send(buf) {
+    this.dc.send(buf);
+    this.sentTotal += buf.byteLength;
+  }
+}
 
 export class PeerSession extends Emitter {
-  constructor({ localId, remoteId, signaling, getIce, settings, limiter }) {
+  constructor({ localId, remoteId, signaling, getIce, hasRelay, settings, limiter }) {
     super();
     this.localId = localId;
     this.remoteId = remoteId;
     this.signaling = signaling;
     this.getIce = getIce;
+    this.hasRelay = hasRelay ?? (() => false);
     this.settings = settings;
     this.limiter = limiter;
     // The polite side yields when both offer at once.
@@ -34,9 +78,16 @@ export class PeerSession extends Emitter {
     this.ctl = null;
     this.state = 'idle';
     this.path = null;
-    this.saturated = false;
+    this.pathInfo = null;
+    this.iceErrors = [];
+    this.saturatedRtc = false;
+    this.saturatedRelay = false;
     this.linkSeq = 0;
     this.linkPending = 0;
+    this.relay = null;
+    this.relayKeys = new Map();
+    this.relayRequested = false;
+    this.relayPending = 0;
     this.outgoing = new Map();
     this.incoming = new Map();
     this.queue = [];
@@ -53,26 +104,59 @@ export class PeerSession extends Emitter {
     this.connected = deferred();
   }
 
-  // ---- the main connection ---------------------------------------------------------
+  // ---- connecting --------------------------------------------------------------------
 
-  /** Connects if not already; resolves once the control channel is open. */
+  /** Connects if not already; resolves once control messages can flow, by either path. */
   connect() {
-    this.#main();
+    if (this.state === 'idle') {
+      if (this.settings.forceRelay && this.hasRelay()) this.#requestRelay();
+      else this.#main();
+    }
     return this.connected.promise;
+  }
+
+  #beginConnecting() {
+    if (this.state !== 'idle') return;
+    this.state = 'connecting';
+    this.emit('state');
+    this.connectTimer = setTimeout(() => {
+      if (this.state === 'connecting') this.close(this.#noRouteMessage());
+    }, CONNECT_TIMEOUT);
+  }
+
+  #connectedNow() {
+    if (this.state !== 'connecting' && this.state !== 'idle') return;
+    clearTimeout(this.connectTimer);
+    clearTimeout(this.fallbackTimer);
+    this.state = 'connected';
+    this.connected.resolve();
+    this.sampleTimer = setInterval(() => this.#sampleLanes(), SAMPLE_EVERY);
+    this.emit('state');
+  }
+
+  #noRouteMessage() {
+    if (this.hasRelay()) return 'Could not connect to this device, directly or through the relay';
+    const turn = (this.rtcConfig?.iceServers ?? []).some((s) => [].concat(s.urls).some((u) => u.startsWith('turn')));
+    return turn
+      ? 'Could not connect to this device'
+      : 'Could not connect: the networks block a direct connection and no relay is configured';
   }
 
   #main() {
     if (!this.mainPromise) {
+      this.#beginConnecting();
       this.mainPromise = this.#createMain();
-      this.mainPromise.catch((e) => this.close(e.message));
+      this.mainPromise.catch((e) => this.#rtcFailed(e.message));
     }
     return this.mainPromise;
   }
 
   async #createMain() {
-    this.state = 'connecting';
-    this.emit('state');
-    this.rtcConfig = { ...(await this.getIce()), bundlePolicy: 'max-bundle' };
+    this.rtcConfig = {
+      ...(await this.getIce()),
+      bundlePolicy: 'max-bundle',
+      iceTransportPolicy: this.settings.turnOnly ? 'relay' : 'all',
+    };
     const pc = new RTCPeerConnection(this.rtcConfig);
     const ctl = pc.createDataChannel('ctl', { negotiated: true, id: CTL_ID, ordered: true });
     const dc = pc.createDataChannel('data', { negotiated: true, id: DATA_ID, ordered: true });
@@ -93,18 +177,16 @@ export class PeerSession extends Emitter {
     pc.onicecandidate = ({ candidate }) => {
       if (candidate) this.#signal({ k: 'ice', c: candidate });
     };
+    pc.onicecandidateerror = (e) => {
+      if (this.iceErrors.length < 20) this.iceErrors.push({ url: e.url, code: e.errorCode, text: e.errorText });
+    };
     pc.onconnectionstatechange = () => this.#onMainState();
-    this.connectTimer = setTimeout(() => {
-      if (this.state === 'connecting') this.close(this.#noRouteMessage());
-    }, CONNECT_TIMEOUT);
+    if (this.hasRelay()) {
+      this.fallbackTimer = setTimeout(() => {
+        if (!this.ctlReady()) this.#requestRelay();
+      }, FALLBACK_AFTER);
+    }
     return pc;
-  }
-
-  #noRouteMessage() {
-    const relay = (this.rtcConfig?.iceServers ?? []).some((s) => [].concat(s.urls).some((u) => u.startsWith('turn')));
-    return relay
-      ? 'Could not connect to this device'
-      : 'Could not connect: the networks block a direct connection and no relay is configured';
   }
 
   #signal(data) {
@@ -118,6 +200,17 @@ export class PeerSession extends Emitter {
 
   async #handleSignal(data) {
     if (this.state === 'closed') return;
+    if (data.k === 'relay-key') {
+      this.#onRelayKey(data);
+      return;
+    }
+    if (data.k === 'relay-please') {
+      if (!this.relay) {
+        this.relayRequested = false;
+        this.#requestRelay();
+      }
+      return;
+    }
     const pc = await this.#main();
     if (data.k === 'sdp') {
       const d = data.d;
@@ -143,7 +236,7 @@ export class PeerSession extends Emitter {
     if (s === 'connected') {
       this.restarts = 0;
       this.#detectPath();
-      setTimeout(() => this.#detectPath(), 3000);
+      if (!this.pathTimer) this.pathTimer = setInterval(() => this.#detectPath(), PATH_EVERY);
     } else if (s === 'failed') {
       // A network change: try new candidates over the same DTLS/SCTP association, which
       // lets transfers in progress carry on.
@@ -151,14 +244,32 @@ export class PeerSession extends Emitter {
         this.restarts++;
         this.main.restartIce();
       } else {
-        this.close(this.ctl ? 'Connection lost' : this.#noRouteMessage());
+        this.#rtcFailed(this.ctl ? 'Connection lost' : null);
       }
     } else if (s === 'closed') {
-      this.close('Connection closed');
+      this.#rtcFailed('Connection closed');
     }
   }
 
+  /** WebRTC is gone or never came: carry on through the relay if there is one. */
+  #rtcFailed(reason) {
+    if (this.state === 'closed') return;
+    if (this.hasRelay()) {
+      if (!this.relayRequested) this.#requestRelay();
+      if (this.#relayCtlOpen() || this.state === 'connecting') return;
+      // Mid-transfer: the relay gets a moment to take over before the session gives up.
+      clearTimeout(this.rescueTimer);
+      this.rescueTimer = setTimeout(() => {
+        if (!this.ctlReady()) this.close(reason ?? this.#noRouteMessage());
+      }, 15_000);
+      return;
+    }
+    this.close(reason ?? this.#noRouteMessage());
+  }
+
+  /** Which way WebRTC goes, refreshed every couple of seconds: Chrome may switch paths. */
   async #detectPath() {
+    if (!this.main || this.state === 'closed') return;
     try {
       const stats = await this.main.getStats();
       let pair = null;
@@ -171,29 +282,207 @@ export class PeerSession extends Emitter {
         });
       }
       if (!pair) return;
-      const types = [stats.get(pair.localCandidateId)?.candidateType, stats.get(pair.remoteCandidateId)?.candidateType];
-      this.path = types.includes('relay') ? 'relay' : types.every((t) => t === 'host') ? 'lan' : 'direct';
-      this.rtt = pair.currentRoundTripTime;
-      this.emit('path', this.path);
-      this.emit('state');
+      const local = stats.get(pair.localCandidateId);
+      const remote = stats.get(pair.remoteCandidateId);
+      const types = [local?.candidateType, remote?.candidateType];
+      const path = types.includes('relay') ? 'turn' : types.every((t) => t === 'host') ? 'lan' : 'direct';
+      const summarize = (kind) => {
+        const out = {};
+        stats.forEach((c) => {
+          if (c.type !== kind) return;
+          const proto = c.relayProtocol ?? c.protocol;
+          const k = proto ? `${c.candidateType}/${proto}` : c.candidateType;
+          out[k] = (out[k] ?? 0) + 1;
+        });
+        return out;
+      };
+      this.pathInfo = {
+        path,
+        local: { type: local?.candidateType, protocol: local?.protocol, relayProtocol: local?.relayProtocol, url: local?.url },
+        remote: { type: remote?.candidateType, protocol: remote?.protocol },
+        rtt: pair.currentRoundTripTime,
+        bytesSent: pair.bytesSent,
+        bytesReceived: pair.bytesReceived,
+        localCandidates: summarize('local-candidate'),
+        remoteCandidates: summarize('remote-candidate'),
+      };
+      if (path !== this.path) {
+        this.path = path;
+        this.emit('path', path);
+        this.emit('state');
+      }
     } catch {
       /* closed meanwhile */
     }
   }
 
-  // ---- control channel -------------------------------------------------------------
+  // ---- the relay ---------------------------------------------------------------------
+
+  /**
+   * Gets a relay session going. Only the polite side asks the server, so two requests never
+   * cross; the other side asks it to (through signaling, which works without any connection).
+   */
+  #requestRelay() {
+    if (!this.hasRelay() || this.relayRequested || this.state === 'closed') return;
+    this.relayRequested = true;
+    this.#beginConnecting();
+    if (this.polite) this.signaling.send({ t: 'relay', to: this.remoteId });
+    else this.#signal({ k: 'relay-please' });
+  }
+
+  /**
+   * A ticket from the server, for a session with this device. Both devices get it, and if
+   * both asked at once there are two: each side keeps the one with the smaller id, so both
+   * end up in the same session.
+   */
+  onRelayTicket(ticket) {
+    if (this.state === 'closed') return;
+    if (this.relay && this.relay.ticket.session <= ticket.session) return;
+    if (this.relay) this.#dropRelay();
+    this.relayRequested = true;
+    this.#beginConnecting();
+    const relay = { ticket, key: deferred(), keyPair: makeKeyPair(), lanes: new Map(), keyStarted: false };
+    this.relay = relay;
+    relay.keyPair.then(
+      ({ pub }) => this.#signal({ k: 'relay-key', session: ticket.session, pub }),
+      (e) => relay.key.reject(e),
+    );
+    const early = this.relayKeys.get(ticket.session);
+    if (early) this.#onRelayKey({ session: ticket.session, pub: early });
+    this.#openRelayLane(0);
+  }
+
+  #onRelayKey({ session, pub }) {
+    if (typeof session !== 'string' || typeof pub !== 'string') return;
+    const relay = this.relay;
+    if (!relay || relay.ticket.session !== session) {
+      // The other device's key can beat our ticket here; keep it for when the ticket comes.
+      this.relayKeys.set(session, pub);
+      if (this.relayKeys.size > 4) this.relayKeys.delete(this.relayKeys.keys().next().value);
+      return;
+    }
+    if (relay.keyStarted) return;
+    relay.keyStarted = true;
+    relay.keyPair
+      .then(({ pair }) => deriveKey(pair, pub, session))
+      .then(
+        (k) => relay.key.resolve(k),
+        (e) => relay.key.reject(e),
+      );
+  }
+
+  #openRelayLane(index) {
+    const relay = this.relay;
+    if (!relay) return null;
+    if (relay.lanes.has(index)) return relay.lanes.get(index);
+    const lane = new RelayLane(relay.ticket, index, relay.key.promise, {
+      onReady: (l) => {
+        l.opened.resolve(l);
+        if (index === 0) this.#connectedNow();
+        this.#lanesChanged();
+      },
+      onFrame: (l, plain) => {
+        if (new Uint8Array(plain, 0, 1)[0] === T_CTL) this.#onCtlText(ctlText(plain));
+        else this.#onData(l, plain);
+      },
+      onClose: (l, why) => {
+        l.opened.reject(new Error(why));
+        if (relay.lanes.get(index) === l) relay.lanes.delete(index);
+        this.#lanesChanged();
+        if (index === 0 && this.relay === relay && !this.#rtcCtlOpen() && this.state !== 'closed') {
+          this.close(why.includes('other device') ? 'The other device left' : `Relay lost: ${why}`);
+        }
+      },
+      onDrain: () => this.wakeDrain(),
+    });
+    lane.opened = deferred();
+    relay.lanes.set(index, lane);
+    return lane;
+  }
+
+  #dropRelay() {
+    const relay = this.relay;
+    this.relay = null;
+    if (!relay) return;
+    for (const l of relay.lanes.values()) l.close('replaced');
+  }
+
+  relayLaneCount() {
+    return this.relay ? this.relay.lanes.size : 0;
+  }
+
+  /** One more relay lane: the first asks the server for a session, later ones tell the other device. */
+  async addRelayLane() {
+    if (!this.hasRelay()) throw new Error('no relay');
+    this.relayPending++;
+    this.emit('state');
+    try {
+      if (!this.relay) {
+        this.#requestRelay();
+        const t0 = performance.now();
+        while (!this.relay?.lanes.get(0)) {
+          if (performance.now() - t0 > 10_000 || this.state === 'closed') throw new Error('no relay ticket');
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        return await withTimeout(this.relay.lanes.get(0).opened.promise, 15_000, 'the relay did not connect');
+      }
+      let index = 0;
+      while (this.relay.lanes.has(index)) index++;
+      if (index >= MAX_RELAY_LANES) throw new Error('enough relay lanes');
+      const lane = this.#openRelayLane(index);
+      await this.sendCtl({ t: 'relay-lane', n: index });
+      try {
+        return await withTimeout(lane.opened.promise, 15_000, 'the relay lane did not connect');
+      } catch (e) {
+        lane.close(e.message);
+        throw e;
+      }
+    } finally {
+      this.relayPending--;
+      this.emit('state');
+    }
+  }
+
+  /** Closes one relay lane that did not help, unless control messages depend on it. */
+  closeRelayLane(lane) {
+    if (lane.index === 0 && this.#ctlVia() === 'relay') return;
+    lane.close('not needed');
+  }
+
+  // ---- control channel ---------------------------------------------------------------
 
   #setupCtl(ctl) {
     ctl.bufferedAmountLowThreshold = CTL_HIGH / 4;
     ctl.onopen = () => {
-      clearTimeout(this.connectTimer);
       this.ctl = ctl;
-      this.state = 'connected';
-      this.connected.resolve();
+      this.#connectedNow();
       this.emit('state');
     };
     ctl.onmessage = (e) => this.#onCtlText(e.data);
-    ctl.onclose = () => this.close('Connection closed');
+    ctl.onclose = () => {
+      if (!this.#relayCtlOpen()) this.#rtcFailed('Connection closed');
+    };
+  }
+
+  #rtcCtlOpen() {
+    return this.ctl?.readyState === 'open';
+  }
+
+  #relayCtlOpen() {
+    return Boolean(this.relay?.lanes.get(0)?.ready);
+  }
+
+  ctlReady() {
+    return this.#rtcCtlOpen() || this.#relayCtlOpen();
+  }
+
+  /** WebRTC while it is direct; the relay when WebRTC is absent or goes through TURN. */
+  #ctlVia() {
+    const rtc = this.#rtcCtlOpen();
+    const relay = this.#relayCtlOpen();
+    if (rtc && (!relay || this.path === 'lan' || this.path === 'direct')) return 'rtc';
+    if (relay) return 'relay';
+    return null;
   }
 
   /** Sends one control message, split into fragments when it is large (a big offer). */
@@ -208,8 +497,15 @@ export class PeerSession extends Emitter {
   }
 
   async #ctlSend(s) {
+    const via = this.#ctlVia();
+    if (via === 'relay') {
+      const lane = this.relay.lanes.get(0);
+      while (lane.buffered > CTL_HIGH * 8 && lane.ready) await this.waitDrain(50);
+      lane.sendCtl(s);
+      return;
+    }
+    if (via !== 'rtc') throw new Error('not connected');
     const ctl = this.ctl;
-    if (!ctl || ctl.readyState !== 'open') throw new Error('not connected');
     while (ctl.bufferedAmount > CTL_HIGH && ctl.readyState === 'open') {
       await new Promise((r) => {
         ctl.addEventListener('bufferedamountlow', r, { once: true });
@@ -251,6 +547,9 @@ export class PeerSession extends Emitter {
       case 'link':
         this.linkChain = this.linkChain.then(() => this.#onLink(m)).catch((e) => console.warn('link', e));
         break;
+      case 'relay-lane':
+        if (Number.isInteger(m.n) && m.n > 0 && m.n < MAX_RELAY_LANES) this.#openRelayLane(m.n);
+        break;
       case 'offer':
         this.#onOffer(m);
         break;
@@ -272,12 +571,12 @@ export class PeerSession extends Emitter {
   // ---- lanes -------------------------------------------------------------------------
 
   #addLink(lid, pc, dc) {
-    const link = { lid, pc, dc, open: false, opened: deferred(), pendingCands: [] };
+    const link = new RtcLane(lid, pc, dc);
     dc.binaryType = 'arraybuffer';
     dc.bufferedAmountLowThreshold = LANE_LOW;
     dc.onopen = () => {
       link.open = true;
-      link.opened.resolve();
+      link.opened.resolve(link);
       this.#lanesChanged();
     };
     dc.onclose = () => {
@@ -298,20 +597,50 @@ export class PeerSession extends Emitter {
     return link;
   }
 
+  /** Every lane that can take data now, WebRTC and relay. */
   openLanes() {
     const out = [];
-    for (const l of this.links.values()) if (l.open && l.dc.readyState === 'open') out.push(l);
+    for (const l of this.links.values()) if (l.ready) out.push(l);
+    if (this.relay) for (const l of this.relay.lanes.values()) if (l.ready) out.push(l);
     return out;
+  }
+
+  #allLanes() {
+    return [...this.links.values(), ...(this.relay ? this.relay.lanes.values() : [])];
+  }
+
+  laneOpen(lid) {
+    return this.openLanes().some((l) => l.lid === lid);
   }
 
   linkCount() {
     return this.links.size;
   }
 
-  /** How many connections the settings allow to this device. */
+  /** How many WebRTC connections the settings allow to this device. */
   targetLinks() {
     const s = this.settings.maxLinks;
     return s === 'auto' ? AUTO_LINKS : Math.max(1, Math.min(MAX_LINKS, Number(s) || 1));
+  }
+
+  /**
+   * Each lane's drain rate, from what it has sent minus what it still holds, measured only
+   * while it holds something (an idle lane says nothing about its speed). Its queue limit
+   * follows: about 0.75 s of its own rate, so a slow lane never sits on much.
+   */
+  #sampleLanes() {
+    const now = performance.now();
+    for (const l of this.#allLanes()) {
+      const buffered = l.buffered;
+      const drained = l.sentTotal - buffered;
+      const s = l.sample;
+      if (s && (s.buffered > 0 || buffered > 0)) {
+        const inst = ((drained - s.drained) / (now - s.at)) * 1000;
+        l.rate = l.rate ? l.rate * 0.7 + inst * 0.3 : inst;
+      }
+      l.sample = { at: now, drained, buffered };
+      l.high = l.rate ? Math.min(LANE_HIGH, Math.max(1 << 20, l.rate * 0.75)) : 2 << 20;
+    }
   }
 
   wakeDrain() {
@@ -341,7 +670,29 @@ export class PeerSession extends Emitter {
     this.incoming.get(tn)?.onData(link, buf);
   }
 
-  /** Opens one more connection to this device, negotiated over `ctl`. */
+  /**
+   * What to add when a transfer wants more: on a LAN, WebRTC connections first (they stay
+   * local); elsewhere relay lanes first (in measurements one relay lane outran any number of
+   * WebRTC connections). A kind that once failed to raise the rate is not tried again.
+   */
+  nextGrowth() {
+    const rtcOk =
+      this.#rtcCtlOpen() &&
+      this.path &&
+      this.path !== 'turn' &&
+      !this.saturatedRtc &&
+      this.links.size < this.targetLinks();
+    const relayOk =
+      this.hasRelay() && this.settings.boost !== false && !this.saturatedRelay && this.relayLaneCount() < MAX_RELAY_LANES;
+    if (this.path === 'lan') return rtcOk ? 'rtc' : relayOk ? 'relay' : null;
+    return relayOk ? 'relay' : rtcOk ? 'rtc' : null;
+  }
+
+  get growing() {
+    return this.linkPending > 0 || this.relayPending > 0;
+  }
+
+  /** Opens one more WebRTC connection to this device, negotiated over `ctl`. */
   async addLink() {
     if (this.links.size >= MAX_LINKS) throw new Error('enough connections');
     const lid = `${this.polite ? 'p' : 'q'}${++this.linkSeq}`;
@@ -377,7 +728,7 @@ export class PeerSession extends Emitter {
     if (typeof m.lid !== 'string' || m.lid === '0' || m.lid.length > 16) return;
     let link = this.links.get(m.lid);
     if (m.op === 'offer') {
-      if (link || this.links.size >= MAX_LINKS) return;
+      if (link || this.links.size >= MAX_LINKS || !this.rtcConfig) return;
       const pc = new RTCPeerConnection(this.rtcConfig);
       const dc = pc.createDataChannel('data', { negotiated: true, id: DATA_ID, ordered: true });
       link = this.#addLink(m.lid, pc, dc);
@@ -414,12 +765,52 @@ export class PeerSession extends Emitter {
     this.#lanesChanged();
   }
 
-  /** The payload size of one chunk: as large as both browsers accept, at most 256 KB. */
+  /** The payload size of one chunk: as large as both ends accept, at most 256 KB. */
   chunkSize() {
-    const max = this.main?.sctp?.maxMessageSize || 65_536;
-    const message = Math.min(max, 256 * 1024);
+    const rtcMax = this.main?.sctp?.maxMessageSize;
+    const message = rtcMax ? Math.min(rtcMax, 256 * 1024) : this.relay ? 256 * 1024 : 65_536;
     // 4 KB multiples keep disk writes aligned.
     return Math.max(4096, Math.floor((message - HDR) / 4096) * 4096);
+  }
+
+  /** How data travels now, for people: lan, direct, turn, relay, direct+relay, turn+relay. */
+  route() {
+    const lanes = this.openLanes();
+    const rtc = lanes.some((l) => l.kind === 'rtc');
+    const relay = lanes.some((l) => l.kind === 'relay');
+    if (rtc && relay) return this.path === 'turn' ? 'turn+relay' : 'direct+relay';
+    if (relay) return 'relay';
+    if (rtc) return this.path ?? 'direct';
+    return null;
+  }
+
+  /** Everything worth knowing about this connection, for the diagnostics panel. */
+  diagnostics() {
+    return {
+      state: this.state,
+      route: this.route(),
+      control: this.#ctlVia(),
+      webrtc: this.main
+        ? {
+            connection: this.main.connectionState,
+            ice: this.main.iceConnectionState,
+            path: this.pathInfo,
+            maxMessageSize: this.main.sctp?.maxMessageSize ?? null,
+            iceErrors: this.iceErrors,
+          }
+        : null,
+      relay: this.relay ? { session: `${this.relay.ticket.session.slice(0, 6)}…`, lanes: this.relay.lanes.size } : null,
+      lanes: this.#allLanes().map((l) => ({
+        lane: l.lid,
+        kind: l.kind,
+        ready: l.ready,
+        queued: l.buffered,
+        rate: Math.round(l.rate ?? 0),
+      })),
+      chunk: this.chunkSize(),
+      saturated: { webrtc: this.saturatedRtc, relay: this.saturatedRelay },
+      closeReason: this.closeReason ?? null,
+    };
   }
 
   // ---- transfers ---------------------------------------------------------------------
@@ -474,6 +865,10 @@ export class PeerSession extends Emitter {
     this.state = 'closed';
     this.closeReason = reason;
     clearTimeout(this.connectTimer);
+    clearTimeout(this.fallbackTimer);
+    clearTimeout(this.rescueTimer);
+    clearInterval(this.pathTimer);
+    clearInterval(this.sampleTimer);
     for (const t of [...this.outgoing.values(), ...this.incoming.values()]) t.onSessionClosed(reason);
     for (const l of this.links.values()) {
       try {
@@ -483,10 +878,10 @@ export class PeerSession extends Emitter {
       }
     }
     this.links.clear();
+    this.#dropRelay();
     this.wakeDrain();
     this.connected.reject(new Error(reason));
     this.emit('state');
     this.emit('closed', reason);
   }
 }
-

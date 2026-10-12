@@ -2,6 +2,7 @@
 
 import { Signaling } from './signaling.js';
 import { PeerSession } from './peer.js';
+import { initDiagnostics, routeLabel } from './diagnostics.js';
 import { entriesFromDrop, entriesFromInput, commonRoot } from './files.js';
 import {
   canPickFolder,
@@ -43,7 +44,7 @@ const icon = (name) => {
 
 const SETTINGS_KEY = 'ums.settings';
 const settings = Object.assign(
-  { name: '', limitMBps: 0, maxLinks: 'auto' },
+  { name: '', limitMBps: 0, maxLinks: 'auto', boost: true, forceRelay: false, turnOnly: false },
   (() => {
     try {
       return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {};
@@ -75,6 +76,9 @@ function roomFromUrl() {
 let room = roomFromUrl();
 let me = { id: null, name: settings.name };
 let ice = { iceServers: [] };
+let relayAvailable = false;
+let roomInfo = null;
+let serverVersion = null;
 let iceWaiters = [];
 const peers = new Map(); // id -> { info, el }
 const sessions = new Map(); // id -> PeerSession
@@ -101,6 +105,9 @@ signaling.on('state', (state) => {
 signaling.on('welcome', (m) => {
   me = { id: m.id, name: m.name };
   ice = m.ice;
+  relayAvailable = Boolean(m.relay);
+  roomInfo = m.room;
+  serverVersion = m.version;
   if (!settings.name) {
     settings.name = m.name;
     saveSettings();
@@ -122,9 +129,11 @@ signaling.on('peer-updated', (m) => {
   } else if (peers.has(m.peer.id)) {
     peers.get(m.peer.id).info = m.peer;
     renderPeer(m.peer.id);
+    layout();
   }
 });
 signaling.on('signal', (m) => session(m.from).handleSignal(m.data));
+signaling.on('relay', (m) => session(m.peer).onRelayTicket(m));
 signaling.on('ice', (m) => {
   ice = m.ice;
   for (const r of iceWaiters.splice(0)) r(ice);
@@ -158,11 +167,22 @@ async function getIce() {
 function session(peerId) {
   let s = sessions.get(peerId);
   if (s && s.state !== 'closed') return s;
-  s = new PeerSession({ localId: me.id, remoteId: peerId, signaling, getIce, settings, limiter });
+  s = new PeerSession({
+    localId: me.id,
+    remoteId: peerId,
+    signaling,
+    getIce,
+    hasRelay: () => relayAvailable,
+    settings,
+    limiter,
+  });
   sessions.set(peerId, s);
   s.on('transfer', (t) => addTransfer(t, peerId));
   s.on('offer', (t) => queueOffer(t));
-  s.on('state', () => renderPeer(peerId));
+  s.on('state', () => {
+    renderPeer(peerId);
+    layout();
+  });
   s.on('closed', () => {
     if (sessions.get(peerId) === s) sessions.delete(peerId);
     renderPeer(peerId);
@@ -229,10 +249,13 @@ function renderPeer(id) {
   btn.setAttribute('aria-label', `Send to ${info.name}`);
   const s = sessions.get(id);
   const badge = btn.querySelector('.badge');
-  const path = s?.state === 'connected' ? s.path : null;
-  badge.hidden = !path && s?.state !== 'connecting';
-  badge.dataset.path = path ?? '';
-  badge.textContent = s?.state === 'connecting' ? 'connecting' : { lan: 'LAN', direct: 'Direct', relay: 'Relayed' }[path] ?? '';
+  const route = s?.state === 'connected' ? s.route() : null;
+  badge.hidden = !route && s?.state !== 'connecting';
+  badge.dataset.path = route?.includes('relay') ? 'worker' : route === 'turn' ? 'relay' : (route ?? '');
+  badge.textContent =
+    s?.state === 'connecting'
+      ? 'connecting'
+      : ({ lan: 'LAN', direct: 'Direct', turn: 'TURN', relay: 'Relay', 'direct+relay': 'Direct + relay', 'turn+relay': 'TURN + relay' }[route] ?? '');
   // Ring: progress of everything in flight with this device.
   let total = 0;
   let done = 0;
@@ -246,18 +269,66 @@ function renderPeer(id) {
   fg.style.opacity = total ? '1' : '0';
 }
 
+/**
+ * Spots for n devices around the middle (where you are), as offsets from it: one ring, else
+ * two, whichever first leaves every box clear of every other box and of yours, and inside
+ * the field. Null when no arrangement fits.
+ */
+function arrange(n, width, height, bw, bh) {
+  if (!n) return [];
+  const maxX = width / 2 - bw / 2;
+  const maxY = height / 2 - bh / 2;
+  if (maxX <= 0 || maxY <= 0) return null;
+  const ry = Math.min(maxY, 240);
+  const fits = (spots) =>
+    spots.every((p, i) => {
+      if (Math.abs(p.x) > maxX + 0.5 || Math.abs(p.y) > maxY + 0.5) return false;
+      if (Math.abs(p.x) < bw && Math.abs(p.y) < bh) return false; // on top of you
+      return spots.every((q, j) => j <= i || Math.abs(p.x - q.x) >= bw || Math.abs(p.y - q.y) >= bh);
+    });
+  // A compact ring first; then two rings; on a wide screen, wider ones before giving up.
+  const geometries = [];
+  for (const rx of new Set([Math.min(maxX, 340), maxX])) {
+    for (const rings of [[1], [1, 0.55], [1, 0.65], [1, 0.75]]) geometries.push({ rx, rings });
+  }
+  for (const { rx, rings } of geometries) {
+    const weight = rings.reduce((a, r) => a + r, 0);
+    const counts = rings.map((r) => Math.floor((n * r) / weight));
+    for (let left = n - counts.reduce((a, c) => a + c, 0), i = 0; left > 0; left--, i = (i + 1) % rings.length) counts[i]++;
+    if (counts.some((c) => c === 0)) continue;
+    for (const shift of [0, 0.5, 0.25]) {
+      const spots = [];
+      rings.forEach((r, ri) => {
+        const k = counts[ri];
+        for (let i = 0; i < k; i++) {
+          const a = -Math.PI / 2 + ((i + shift + (ri ? 0.5 : 0)) / k) * Math.PI * 2;
+          spots.push({ x: Math.cos(a) * rx * r, y: Math.sin(a) * ry * r });
+        }
+      });
+      if (fits(spots)) return spots;
+    }
+  }
+  return null;
+}
+
 function layout() {
-  const field = $('#field').getBoundingClientRect();
+  const field = $('#field');
+  const box = field.getBoundingClientRect();
   const items = [...peers.values()].map((p) => p.el);
-  const n = items.length;
-  // Each device is about 130 px wide and 120 px tall around its centre: keep it inside.
-  const rx = Math.max(100, Math.min(field.width / 2 - 70, 330));
-  const ry = Math.max(95, Math.min(field.height / 2 - 84, 230));
+  // Measured, not assumed: names wrap on phones and the badge comes and goes.
+  const sized = [...items, $('#me')].filter((e) => e.isConnected && e.offsetWidth);
+  const bw = Math.max(110, ...sized.map((e) => e.offsetWidth)) + 6;
+  const bh = Math.max(110, ...sized.map((e) => e.offsetHeight)) + 4;
+  const spots = arrange(items.length, box.width, box.height, bw, bh);
+  field.classList.toggle('crowded', spots === null);
   items.forEach((item, i) => {
-    const a = -Math.PI / 2 + (i / Math.max(n, 1)) * Math.PI * 2;
-    const ring = n > 8 && i % 2 ? 0.6 : 1;
-    item.style.setProperty('--x', `${Math.cos(a) * rx * ring}px`);
-    item.style.setProperty('--y', `${Math.sin(a) * ry * ring}px`);
+    if (spots) {
+      item.style.setProperty('--x', `${spots[i].x}px`);
+      item.style.setProperty('--y', `${spots[i].y}px`);
+    } else {
+      item.style.removeProperty('--x');
+      item.style.removeProperty('--y');
+    }
   });
 }
 // The field shrinks as transfer cards appear, not only when the window resizes.
@@ -626,8 +697,11 @@ const STATE_TEXT = {
   failed: 'Failed',
 };
 
+let transferSeq = 0;
+
 function addTransfer(t, peerId) {
-  const key = `${t.direction}:${peerId}:${t.tn}`;
+  // Transfer numbers start again with every connection: the card needs its own key.
+  const key = `t${++transferSeq}`;
   const card = el('article', 'transfer');
   const head = el('div', 't-head');
   head.append(icon(t.direction === 'out' ? 'up' : 'down'), el('strong'), el('span', 't-state'));
@@ -653,6 +727,7 @@ function addTransfer(t, peerId) {
   transfers.set(key, entry);
   t.on('change', () => (entry.dirty = true));
   t.on('state', () => {
+    if (t.terminal && !t.route) t.route = t.session.route();
     renderTransfer(entry);
     renderPeer(peerId);
     keepAwake();
@@ -690,8 +765,7 @@ function renderTransfer({ t, card, peerId, recent }) {
   const s = t.session;
   if (running && s.state === 'connected') {
     const n = s.openLanes().length;
-    const path = { lan: 'LAN', direct: 'direct', relay: 'relayed' }[s.path] ?? '';
-    stats.push(`${n} connection${n === 1 ? '' : 's'}${path ? `, ${path}` : ''}`);
+    stats.push(`${routeLabel(s.route())}, ${n} lane${n === 1 ? '' : 's'}`);
   }
   if (t.direction === 'in' && t.destination && t.state !== 'pending') stats.push(`into ${t.destination}`);
   card.querySelector('.t-stats').textContent = stats.join('  ·  ');
@@ -756,6 +830,8 @@ function openSettings(focusName = false) {
   $('#set-links').value = String(settings.maxLinks);
   $('#set-dest-field').hidden = !canPickFolder;
   $('#set-dest').textContent = destinationName() ?? 'Not chosen yet';
+  $('#set-boost-field').hidden = !relayAvailable;
+  $('#set-boost').checked = settings.boost !== false;
   $('#settings-dialog').showModal();
   if (focusName) $('#set-name').select();
 }
@@ -777,6 +853,33 @@ $('#set-limit').addEventListener('change', () => {
 $('#set-links').addEventListener('change', () => {
   settings.maxLinks = $('#set-links').value;
   saveSettings();
+});
+$('#set-boost').addEventListener('change', () => {
+  settings.boost = $('#set-boost').checked;
+  saveSettings();
+});
+
+const diagnostics = initDiagnostics(
+  () => ({
+    me,
+    room: roomInfo ? (roomInfo.kind === 'private' ? `private (${roomInfo.code})` : roomInfo.kind) : '–',
+    version: serverVersion,
+    ice,
+    relay: relayAvailable,
+    signalingState: signaling.state,
+    sessions,
+    peers: [...peers.values()].map((p) => p.info),
+    transfers: [...transfers.values()].map((e) => e.t),
+    settings,
+  }),
+  (name, value) => {
+    settings[name] = value;
+    saveSettings();
+  },
+);
+$('#set-diag').addEventListener('click', () => {
+  $('#settings-dialog').close();
+  diagnostics.open();
 });
 $('#set-dest-change').addEventListener('click', async () => {
   try {

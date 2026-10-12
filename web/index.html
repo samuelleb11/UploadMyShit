@@ -169,7 +169,40 @@
             <option value="8">8</option>
           </select>
         </label>
-        <div class="actions"><button value="close" class="btn primary">Done</button></div>
+        <label class="check" id="set-boost-field">
+          <input id="set-boost" type="checkbox" />
+          <span>
+            Speed up transfers through the relay when that is faster
+            <small>Encrypted end to end; the relay passes data it cannot read.</small>
+          </span>
+        </label>
+        <div class="actions">
+          <button id="set-diag" type="button" class="btn">Diagnostics…</button>
+          <button value="close" class="btn primary">Done</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="diag-dialog" class="dialog wide">
+      <form method="dialog">
+        <h2>Diagnostics</h2>
+        <p class="muted">How this browser and its connections behave. Updates live while open.</p>
+        <div class="row diag-tools">
+          <button id="diag-test" type="button" class="btn">Run network test</button>
+          <button id="diag-copy" type="button" class="btn">Copy report</button>
+        </div>
+        <div id="diag-body" class="diag-body"></div>
+        <h3 class="diag-sub">For testing</h3>
+        <label class="check">
+          <input id="diag-force-relay" type="checkbox" />
+          <span>Always use the relay (skip direct connections)</span>
+        </label>
+        <label class="check">
+          <input id="diag-turn-only" type="checkbox" />
+          <span>WebRTC through TURN only (no direct candidates)</span>
+        </label>
+        <p class="muted small">Both apply to connections made from now on.</p>
+        <div class="actions"><button value="close" class="btn primary">Close</button></div>
       </form>
     </dialog>
 

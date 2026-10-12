@@ -20,20 +20,29 @@ Chrome's WebRTC allows.
   grants a credit window, so a slow disk throttles the sender instead of filling memory.
   An optional upload cap applies across all transfers.
 - **Works across networks.** Devices behind the same public address see each other
-  automatically. A private room (a link or a QR code) connects devices anywhere. An
-  external TURN service relays only when no direct path exists.
+  automatically. A private room (a link or a QR code) connects devices anywhere.
+- **A relay for when direct fails, and for speed.** When two devices can't connect
+  directly, they relay through a small Cloudflare Worker you deploy (`worker/`). The data
+  is end-to-end encrypted, so the Worker passes bytes it cannot read. Large transfers also
+  add relay lanes beside a direct connection when that turns out faster. TURN remains an
+  option.
+- **Diagnostics built in.** Settings → Diagnostics shows how each connection travels
+  (route, candidates, round trip, lanes and their rates) and runs a network test. It also
+  explains why a direct connection would or wouldn't work from here.
 
 ## How it works
 
 ```
- Browser A ──── WebSocket (signaling: who's here, SDP, ICE) ────┐
-     │                                                          ▼
-     │                                          uploadmyshit (Rust, axum)
-     │                                          rooms in memory, no storage
- Browser B ──── WebSocket ──────────────────────────────────────┘
+ Browser A ──── WebSocket (signaling: who's here, SDP, ICE, relay tickets) ───┐
+     │                                                                        ▼
+     │                                                  uploadmyshit (Rust, axum)
+     │                                                  rooms in memory, no storage
+ Browser B ──── WebSocket ────────────────────────────────────────────────────┘
      ▲
-     └──── WebRTC data channels, DTLS-encrypted, direct ────── Browser A
-           (relayed through your TURN provider only when no direct path exists)
+     ├──── WebRTC data channels, DTLS-encrypted, direct ──────────── Browser A
+     │
+     └──── WebSockets ── relay Worker (Cloudflare) ── WebSockets ─── Browser A
+           end-to-end encrypted; when there is no direct path, or beside one when faster
 ```
 
 - **Server** ([src/](src/)): serves the page, which is compiled into the binary, and one
@@ -43,15 +52,23 @@ Chrome's WebRTC allows.
     signal devices in its own room.
   - **ICE servers.** The server hands out STUN servers and TURN credentials. It mints the
     credentials (coturn shared-secret scheme) or fetches them (Cloudflare).
+  - **Relay tickets.** When a device asks to relay with another in its room, the server
+    names a fresh session and signs a ticket for each side. The Worker checks it.
   - **Health.** `/healthz` and `/readyz`.
 - **Page** ([web/](web/)): hand-written HTML, CSS and JavaScript modules. No build step,
   no dependencies.
-  - [peer.js](web/js/peer.js): WebRTC connections. The first is negotiated through the
-    server; extra ones are negotiated over the first, browser to browser.
+  - [peer.js](web/js/peer.js): the connections to one device. The first WebRTC
+    connection is negotiated through the server; extra ones are negotiated over the first,
+    browser to browser. It also manages the relay: falling back to it, and adding lanes
+    through it.
+  - [relay.js](web/js/relay.js): relay lanes and their end-to-end encryption.
   - [transfer.js](web/js/transfer.js): the transfer protocol (chunking, lanes, credit
     window, resend, adaptive scaling).
   - [sink-worker.js](web/js/sink-worker.js): disk writes.
-  - [app.js](web/js/app.js): the UI.
+  - [app.js](web/js/app.js) and [diagnostics.js](web/js/diagnostics.js): the UI.
+- **Relay** ([worker/](worker/)): a Cloudflare Worker with one Durable Object per relay
+  session and lane. It pairs two WebSockets and passes frames between them. It hibernates
+  when idle.
 
 Integrity: data channels are reliable and DTLS-authenticated. On top of that, every chunk
 is tracked by index. If a connection dies mid-transfer, the receiver asks again for
@@ -83,7 +100,14 @@ folder:
 | This app, 4 connections | 36–42 MB/s (288–336 Mbps) |
 
 Two machines each give their side a full CPU, so real LAN transfers should do at least
-this well. Relayed transfers run at whatever the TURN provider allows.
+this well.
+
+The relay Worker doesn't have that ceiling: it is plain WebSockets over TCP. Two browsers
+on one machine relaying through a deployed Worker in a nearby Cloudflare location
+measured 0.8–1.05 Gbps on one lane and about 2.2 Gbps on three, consistently. That is a
+best case. Real devices are limited by their own upload and download speed, and by their
+distance to the Worker's location. For comparison, Cloudflare's TURN service varied
+between 0.6 and 85 Mbps from one connection to the next.
 
 ## Running it locally
 
@@ -118,14 +142,28 @@ Every flag has an environment variable. Run `uploadmyshit --help` for the full l
 | `UMS_TURN_SECRET` | – | coturn `use-auth-secret`: per-device, time-limited credentials |
 | `UMS_TURN_TTL` | `86400` | Lifetime of generated credentials; make it longer than any transfer |
 | `UMS_CLOUDFLARE_TURN_KEY_ID`, `UMS_CLOUDFLARE_TURN_API_TOKEN` | – | Cloudflare Realtime TURN |
+| `UMS_RELAY_URL` | – | The relay Worker, `wss://…`. Unset: no relay |
+| `UMS_RELAY_SECRET` | – | The Worker's `RELAY_SECRET`, used to sign relay tickets |
+| `UMS_RELAY_TTL` | `21600` | How long a relay ticket opens connections, in seconds |
 | `UMS_SHUTDOWN_DELAY` | `5` | Seconds of failing readiness before connections close on SIGTERM |
 | `UMS_LOG`, `UMS_LOG_FORMAT` | `info`, `text` | Log filter; `json` for structured logs |
 
-### TURN
+### The relay, and TURN
 
-Most pairs of devices connect directly; STUN is enough for that. A pair whose networks
-allow no direct path needs a relay. This happens with symmetric NATs on some corporate
-and mobile networks. The server hosts no relay: point it at an external one.
+Most pairs of devices connect directly; STUN is enough for that. STUN is also how a
+browser discovers its public address for hole punching, so keep it whatever else you
+use. A pair whose networks allow no direct path needs a relay. This happens with
+symmetric NATs on some corporate and mobile networks.
+
+**The relay Worker** is the recommended fallback (see [Deploying the relay](#the-relay-worker)).
+- **Fallback:** if no direct connection opens within about 4 seconds, the page switches
+  to it.
+- **Boost:** during a large transfer, if its lanes are the bottleneck, the page adds relay
+  lanes and keeps them only if the rate rises by at least 10%. Users can turn this off in
+  Settings.
+
+**TURN** remains supported, through any of these, alongside the relay or instead of it.
+WebRTC uses it inside the connection, when no direct candidate pair works.
 
 - **Cloudflare Realtime TURN:** set the key id and API token. The server fetches
   short-lived ICE servers from Cloudflare, caches them for half their lifetime and hands
@@ -136,8 +174,7 @@ and mobile networks. The server hosts no relay: point it at an external one.
 - **Static credentials:** set `UMS_TURN_URLS`, `UMS_TURN_USERNAME` and
   `UMS_TURN_CREDENTIAL`.
 
-The page never opens extra parallel connections over a relay, so it doesn't multiply
-relay traffic.
+Extra WebRTC connections are never opened over TURN.
 
 ## Deploying
 
@@ -149,6 +186,27 @@ docker run -p 8080:8080 -e UMS_CLOUDFLARE_TURN_KEY_ID=... -e UMS_CLOUDFLARE_TURN
 ```
 
 The image is distroless, runs as non-root and writes nothing.
+
+### The relay Worker
+
+The relay is a Cloudflare Worker with a Durable Object, and the first deploy needs
+`wrangler`: the Cloudflare dashboard can't create a Durable Object class. Name the
+Worker on the command line. The repository holds only a placeholder name.
+
+```sh
+cd worker
+npm ci
+npx wrangler login
+npm run deploy -- --name <your-worker>
+# the secret that relay tickets are signed with: any long random string
+npx wrangler secret put RELAY_SECRET --name <your-worker>
+```
+
+Then give the server the Worker's address and the same secret: `UMS_RELAY_URL=wss://<your-worker>.<your-subdomain>.workers.dev`
+and `UMS_RELAY_SECRET`, or `relay.url` and `relay.secret`/`relay.existingSecret` in the
+chart. The server adds the Worker's origin to the page's Content-Security-Policy.
+
+Without `RELAY_SECRET`, the Worker relays for anyone who knows its address. Set it.
 
 ### Kubernetes (Helm)
 
@@ -168,15 +226,18 @@ ingress:
   host: drop.example.com
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt
-ice:
-  cloudflare:
-    existingSecret: uploadmyshit-turn   # keys: key-id, api-token
+relay:
+  url: wss://<your-worker>.<your-subdomain>.workers.dev
+  existingSecret: uploadmyshit-relay    # key: relay-secret (the Worker's RELAY_SECRET)
 ```
 
 ```sh
-kubectl -n production create secret generic uploadmyshit-turn \
-  --from-literal=key-id=... --from-literal=api-token=...
+kubectl -n production create secret generic uploadmyshit-relay \
+  --from-literal=relay-secret=...
 ```
+
+TURN is configured the same way under `ice.turn` or `ice.cloudflare`; see
+[values.yaml](charts/uploadmyshit/values.yaml).
 
 **Network rooms need real client addresses.** The server reads `X-Forwarded-For` from the
 proxies in `server.trustedProxies` (private ranges by default). The ingress controller
@@ -210,9 +271,13 @@ every other job runs on a public image and is defined in full here.
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 node --test 'tests/web/*.test.mjs'
 
-# Two real Chrome processes sending files to each other through the server:
-cargo build && cd tests/e2e && npm ci
+# Two real Chrome processes sending files to each other through the server. With the
+# Worker's dependencies installed, the relay scenarios run too, against a local relay:
+cargo build && (cd worker && npm ci) && cd tests/e2e && npm ci
 CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" node transfer.mjs
+
+# Relay throughput, through a deployed Worker or a local `npm run dev` in worker/:
+RELAY_URL=wss://<your-worker>.<your-subdomain>.workers.dev node relay-bench.mjs
 
 # Against the real Cloudflare API, with a key in the environment:
 UMS_CLOUDFLARE_TURN_KEY_ID=... UMS_CLOUDFLARE_TURN_API_TOKEN=... cargo test -- --ignored
@@ -235,16 +300,23 @@ scripts/check-chart.sh
   reconnect keeps it, and nobody else can claim it.
 - **The server is limited.** It rate-limits signaling messages and caps connections per
   address, devices per room and frame size.
+- **The relay passes ciphertext only.** Each relay session's AES-256-GCM key comes from
+  an ECDH P-256 exchange between the two pages. Frames carry a counter, so the receiver
+  refuses replayed or reordered frames. The Worker accepts only connections with a ticket
+  signed by the server.
 - **The server can see that devices connected, never what they sent.** It does relay the
-  WebRTC setup, so a compromised server could in principle insert itself (the DTLS
-  fingerprint arrives through it). Comparing fingerprints out of band would close that
-  gap; it is on the roadmap.
+  WebRTC setup and the relay's key exchange, so a compromised server could in principle
+  insert itself. Comparing a code derived from both ends' keys out of band would close
+  that gap; it is on the roadmap.
+- **The diagnostics report contains IP addresses.** That is what makes it useful; mind
+  where you paste it.
 
 ## Roadmap
 
 - Resume an interrupted transfer, using the per-chunk tracking that already exists.
 - Move receiving into a Worker with transferable `RTCDataChannel` (Chrome 130+).
-- A short verification code from both DTLS fingerprints, to detect a man in the middle.
+- A short verification code from both ends' keys (DTLS and relay), to detect a man in
+  the middle.
 - Several replicas, with rooms in a shared store.
 
 ## License

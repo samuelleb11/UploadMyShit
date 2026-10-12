@@ -345,7 +345,7 @@ export class OutgoingTransfer extends Base {
         this.waits.lane += performance.now() - t0;
       }
       try {
-        lane.dc.send(item.buf);
+        lane.send(item.buf);
       } catch {
         // The lane closed under us; the chunk goes out on another.
         this.reader.unshift(item);
@@ -356,12 +356,22 @@ export class OutgoingTransfer extends Base {
     }
   }
 
-  /** The emptiest lane with room, or null when every lane is full. */
+  /**
+   * The lane that will have this chunk on its way soonest: least queued for its measured
+   * rate, among lanes under their own queue limit. A lane not measured yet is assumed
+   * quick, so a new one gets tried. Null when every lane is full.
+   */
   #pickLane() {
     let best = null;
+    let bestTime = Infinity;
     for (const l of this.session.openLanes()) {
-      const b = l.dc.bufferedAmount;
-      if (b < LANE_HIGH && (!best || b < best.dc.bufferedAmount)) best = l;
+      const queued = l.buffered;
+      if (queued >= (l.high ?? LANE_HIGH)) continue;
+      const time = (queued + 1) / (l.rate || 50e6);
+      if (time < bestTime) {
+        best = l;
+        bestTime = time;
+      }
     }
     return best;
   }
@@ -371,7 +381,7 @@ export class OutgoingTransfer extends Base {
     let net = 0;
     let recvAll = 0;
     for (const [lid, sent] of this.sentByLane) {
-      if (this.session.links.get(lid)?.open) net += sent - (this.ackR[lid] || 0);
+      if (this.session.laneOpen(lid)) net += sent - (this.ackR[lid] || 0);
     }
     for (const lid in this.ackR) recvAll += this.ackR[lid];
     return net + Math.max(0, recvAll - this.ackW);
@@ -401,7 +411,7 @@ export class OutgoingTransfer extends Base {
     dv.setUint32(8, this.pass);
     for (const l of lanes) {
       try {
-        l.dc.send(fin.slice(0));
+        l.send(fin.slice(0));
       } catch {
         /* closed; the receiver stops waiting for it */
       }
@@ -433,12 +443,12 @@ export class OutgoingTransfer extends Base {
   }
 
   /**
-   * Opens another connection while that helps. More connections mean more congestion
-   * windows and more send queues, which is what a long or fast path needs; on a path that
-   * is already full they only add overhead. So: grow while the lanes are the bottleneck
-   * (not the receiver's disk, not our reads, not the user's cap), and stop for good once
-   * a new connection fails to raise the rate by 10%. Never through a relay, whose
-   * bandwidth someone else pays for.
+   * Adds lanes while that helps: another WebRTC connection (more congestion windows and send
+   * queues, which a long or fast path needs) or a relay lane (a separate route entirely).
+   * Grow only while the lanes are the bottleneck (not the receiver's disk, not our reads,
+   * not the user's cap), and stop trying a kind once an addition of it fails to raise the
+   * rate by 10%. A relay lane that did not help is closed again, unless it carries the
+   * control messages.
    */
   #tune() {
     const s = this.session;
@@ -453,32 +463,41 @@ export class OutgoingTransfer extends Base {
       this.waitTotals[k] += this.waits[k];
       this.waits[k] = 0;
     }
+    if (this.state !== 'sending' || s.growing) return;
 
-    if (this.state !== 'sending' || s.linkPending) return;
-    const target = s.targetLinks();
-    const have = s.linkCount();
+    if (this.pendingEval) {
+      if (now < this.pendingEval.at) return;
+      const { base, kind, lane } = this.pendingEval;
+      this.pendingEval = null;
+      if (rate < base * 1.1) {
+        if (kind === 'rtc') s.saturatedRtc = true;
+        else {
+          s.saturatedRelay = true;
+          if (lane && s.openLanes().some((l) => l.kind === 'rtc')) s.closeRelayLane(lane);
+        }
+      }
+      return;
+    }
+
     const remaining = this.total - this.recv;
-    if (have >= target || s.path === 'relay' || remaining < SCALE_MIN_REMAINING) return;
-    if (this.settings.maxLinks !== 'auto') {
-      // A fixed count: open them all, one after another, as soon as there is enough to send.
+    if (remaining < SCALE_MIN_REMAINING) return;
+    // A fixed WebRTC connection count: open them all as soon as there is enough to send.
+    if (this.settings.maxLinks !== 'auto' && s.ctlReady() && s.path && s.path !== 'turn' && s.linkCount() < s.targetLinks()) {
       s.addLink()
         .then(() => this.#tune())
         .catch(() => {});
       return;
     }
-    if (this.pendingEval) {
-      if (now < this.pendingEval.at) return;
-      if (rate < this.pendingEval.base * 1.1) s.saturated = true;
-      this.pendingEval = null;
-      return;
-    }
-    if (s.saturated || !laneBound || remaining < rate * 8) return;
-    s.addLink()
-      .then(() => {
-        this.pendingEval = { base: rate, at: performance.now() + 3000 };
+    if (!laneBound || remaining < rate * 8) return;
+    const kind = s.nextGrowth();
+    if (!kind) return;
+    (kind === 'rtc' ? s.addLink() : s.addRelayLane())
+      .then((lane) => {
+        this.pendingEval = { base: rate, kind, lane, at: performance.now() + 3000 };
       })
       .catch(() => {
-        s.saturated = true;
+        if (kind === 'rtc') s.saturatedRtc = true;
+        else s.saturatedRelay = true;
       });
   }
 
@@ -488,16 +507,20 @@ export class OutgoingTransfer extends Base {
       case 'decline':
         this.reply.resolve(m);
         break;
-      case 'ack':
-        if (m.r && typeof m.r === 'object') this.ackR = m.r;
-        this.ackW = Number(m.w) || 0;
+      case 'ack': {
+        // Acks may come by either path and overtake each other: every count only grows.
+        if (m.r && typeof m.r === 'object') {
+          for (const lid in m.r) this.ackR[lid] = Math.max(this.ackR[lid] || 0, Number(m.r[lid]) || 0);
+        }
+        this.ackW = Math.max(this.ackW, Number(m.w) || 0);
         this.lastProgress = performance.now();
-        this.recv = Number(m.u) || 0;
-        this.written = Number(m.d) || 0;
-        this.filesDone = Number(m.f) || 0;
+        this.recv = Math.max(this.recv, Number(m.u) || 0);
+        this.written = Math.max(this.written, Number(m.d) || 0);
+        this.filesDone = Math.max(this.filesDone, Number(m.f) || 0);
         this.#wakeAck();
         this.emit('change');
         break;
+      }
       case 'resend':
         if (this.verdict && m.pass === this.pass && Array.isArray(m.ranges)) {
           const ok = m.ranges.every(

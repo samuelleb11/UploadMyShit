@@ -114,7 +114,8 @@ check web:
 
 # Two real browsers and the real server: folders stream into a folder byte for byte, extra
 # connections open and stay correct, the download fallback hands over each file, a cancel
-# leaves nothing behind. Headless Chromium from the Playwright image; the test's
+# leaves nothing behind, and through a local relay Worker: the automatic fallback, relay-only
+# transfers and relay lanes beside direct ones. Headless Chromium from the Playwright image; the test's
 # playwright-core is pinned to the same version.
 check e2e:
   stage: check
@@ -132,6 +133,8 @@ check e2e:
   script:
     - cargo build --locked
     - npm ci --no-audit --no-fund --prefix tests/e2e
+    # The relay Worker, run locally under wrangler, for the relay scenarios.
+    - npm ci --no-audit --no-fund --prefix worker
     - node tests/e2e/transfer.mjs
 
 check chart:

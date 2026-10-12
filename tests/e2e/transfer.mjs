@@ -6,11 +6,14 @@
 // UMS_BIN       the server binary (default: target/debug/uploadmyshit)
 // CHROME_PATH   a Chrome to drive; unset uses Playwright's own Chromium (the CI image's)
 // UMS_E2E_MB    size of the large file, in MB (default 256)
+//
+// With worker/node_modules installed (cd worker && npm ci), the relay Worker runs locally
+// under `wrangler dev` and the relay scenarios run too.
 
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -30,9 +33,35 @@ async function freePort() {
   return port;
 }
 
-async function startServer() {
+const RELAY_SECRET = 'e2e-relay-secret';
+
+/** The relay Worker under `wrangler dev`, or null when wrangler is not installed. */
+async function startRelay() {
+  const wrangler = join(repo, 'worker', 'node_modules', '.bin', 'wrangler');
+  if (!existsSync(wrangler)) return null;
   const port = await freePort();
-  const proc = spawn(BIN, ['--bind', `127.0.0.1:${port}`, '--stun-urls='], {
+  const proc = spawn(wrangler, ['dev', '--ip', '127.0.0.1', '--port', String(port), '--var', `RELAY_SECRET:${RELAY_SECRET}`], {
+    cwd: join(repo, 'worker'),
+    stdio: ['ignore', 'ignore', 'inherit'],
+    env: { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1' },
+    detached: true,
+  });
+  for (let i = 0; i < 300; i++) {
+    try {
+      if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) return { proc, url: `ws://127.0.0.1:${port}` };
+    } catch {
+      /* not up yet */
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  process.kill(-proc.pid);
+  throw new Error('wrangler dev did not start');
+}
+
+async function startServer(relay) {
+  const port = await freePort();
+  const relayArgs = relay ? ['--relay-url', relay.url, '--relay-secret', RELAY_SECRET] : [];
+  const proc = spawn(BIN, ['--bind', `127.0.0.1:${port}`, '--stun-urls=', ...relayArgs], {
     stdio: ['ignore', 'inherit', 'inherit'],
     env: { ...process.env, UMS_LOG: 'warn' },
   });
@@ -136,7 +165,9 @@ async function readTree(dirName) {
 
 // ---- the test ----------------------------------------------------------------------
 
-const { proc, url } = await startServer();
+const relay = await startRelay();
+if (!relay) console.log('(relay scenarios skipped: run `npm ci` in worker/ to include them)');
+const { proc, url } = await startServer(relay);
 // Two browser processes, as two machines would have: one process would put both ends on
 // a single network thread and halve what WebRTC can do.
 // Real (temporary) profiles: an incognito context's storage quota is too small for the
@@ -217,6 +248,7 @@ try {
           path: t.session.path,
           chunk: t.chunk,
           waits: Object.fromEntries(Object.entries(t.waitTotals).map(([k, v]) => [k, Math.round(v)])),
+          lanesUsed: [...t.sentByLane.keys()],
         };
       },
       { to: idB, dirs },
@@ -328,6 +360,82 @@ try {
     assert.ok(!('big.bin' in tree.files), 'the interrupted file did not appear');
   });
 
+  /** Closes both pages' connections to each other, so the next transfer connects afresh. */
+  const reconnect = async () => {
+    // Known settings first: a step that failed may have left its own behind.
+    for (const page of [a, b]) {
+      await page.evaluate(() => Object.assign(window.__ums.settings, { forceRelay: false, turnOnly: false, maxLinks: 'auto' }));
+    }
+    await a.evaluate((id) => window.__ums.sessions.get(id)?.close('test'), idB);
+    await b.evaluate((id) => window.__ums.sessions.get(id)?.close('test'), idA);
+  };
+  const routeOf = () => a.evaluate((id) => window.__ums.sessions.get(id)?.route(), idB);
+
+  if (relay) {
+    await step('with no direct path, the page falls back to the relay by itself', async () => {
+      await reconnect();
+      // TURN only, and no TURN server: WebRTC cannot find any path at all.
+      await a.evaluate(() => (window.__ums.settings.turnOnly = true));
+      await b.evaluate(() => (window.__ums.settings.turnOnly = true));
+      await b.evaluate(async () => {
+        const dest = await (await navigator.storage.getDirectory()).getDirectoryHandle('dest-fallback', { create: true });
+        window.__ums.setAutoAccept(() => ({ mode: 'dir', dir: dest }));
+      });
+      const r = await send([]);
+      assert.equal(r.state, 'done', r.error);
+      assert.equal(await routeOf(), 'relay');
+      console.log(`     ${(total / 1e6 / r.seconds).toFixed(0)} MB/s through the local relay`);
+      const tree = await b.evaluate(readTree, 'dest-fallback');
+      for (const [path, hash] of Object.entries(hashes)) assert.equal(tree.files[path], hash, `content of ${path}`);
+      await b.evaluate(dropTree, 'dest-fallback');
+      await a.evaluate(() => (window.__ums.settings.turnOnly = false));
+      await b.evaluate(() => (window.__ums.settings.turnOnly = false));
+    });
+
+    await step('"always use the relay" sends everything through it, encrypted, byte for byte', async () => {
+      await reconnect();
+      await a.evaluate(() => (window.__ums.settings.forceRelay = true));
+      await b.evaluate(async () => {
+        const dest = await (await navigator.storage.getDirectory()).getDirectoryHandle('dest-relay', { create: true });
+        window.__ums.setAutoAccept(() => ({ mode: 'dir', dir: dest }));
+      });
+      const r = await send([]);
+      assert.equal(r.state, 'done', r.error);
+      const d = await a.evaluate((id) => window.__ums.sessions.get(id).diagnostics(), idB);
+      assert.equal(d.route, 'relay');
+      assert.equal(d.webrtc, null, 'no WebRTC connection was made');
+      assert.ok(d.lanes.every((l) => l.kind === 'relay'));
+      const tree = await b.evaluate(readTree, 'dest-relay');
+      for (const [path, hash] of Object.entries(hashes)) assert.equal(tree.files[path], hash, `content of ${path}`);
+      await b.evaluate(dropTree, 'dest-relay');
+      await a.evaluate(() => (window.__ums.settings.forceRelay = false));
+    });
+
+    await step('relay lanes beside a direct connection share the data and keep it intact', async () => {
+      await reconnect();
+      await b.evaluate(async () => {
+        const dest = await (await navigator.storage.getDirectory()).getDirectoryHandle('dest-mixed', { create: true });
+        window.__ums.setAutoAccept(() => ({ mode: 'dir', dir: dest }));
+      });
+      // Connect directly first, with a small transfer, then add a relay lane beside it.
+      await a.evaluate(async (to) => {
+        const t = window.__ums.send(to, [{ path: 'hello.txt', file: new File(['hi'], 'hello.txt') }], []);
+        await new Promise((resolve) => t.on('state', () => t.terminal && resolve()));
+        await window.__ums.sessions.get(to).addRelayLane();
+      }, idB);
+      assert.equal(await routeOf(), 'direct+relay');
+      const r = await send([]);
+      assert.equal(r.state, 'done', r.error);
+      const d = await a.evaluate((id) => window.__ums.sessions.get(id).diagnostics(), idB);
+      console.log(`     ${(total / 1e6 / r.seconds).toFixed(0)} MB/s over ${d.lanes.map((l) => `${l.lane}/${l.kind}`).join(', ')}`);
+      const kinds = new Set(r.lanesUsed.map((lid) => (lid.startsWith('r') ? 'relay' : 'rtc')));
+      assert.ok(kinds.has('relay') && kinds.has('rtc'), `data went over both kinds of lane: ${[...kinds]}`);
+      const tree = await b.evaluate(readTree, 'dest-mixed');
+      for (const [path, hash] of Object.entries(hashes)) assert.equal(tree.files[path], hash, `content of ${path}`);
+      await b.evaluate(dropTree, 'dest-mixed');
+    });
+  }
+
   await step('a private room is created from the header and joined by pasting its link', async () => {
     await a.locator('#room-action').click();
     await a.waitForURL(/\/r\/[a-z2-9]{10}$/);
@@ -357,6 +465,7 @@ try {
 } finally {
   await Promise.all(browsers.map((b) => b.close()));
   proc.kill();
+  if (relay) process.kill(-relay.proc.pid);
   for (const dir of profiles) rmSync(dir, { recursive: true, force: true });
 }
 

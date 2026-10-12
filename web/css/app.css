@@ -817,3 +817,125 @@ body.dragging .peer .avatar {
     animation: none !important;
   }
 }
+
+/* ---- diagnostics ---- */
+
+.dialog.wide {
+  width: min(760px, calc(100% - 32px));
+}
+
+.diag-tools {
+  margin-bottom: 12px;
+}
+
+.diag-body {
+  display: grid;
+  gap: 12px;
+  max-height: 55vh;
+  overflow-y: auto;
+}
+
+.diag-section {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.diag-section h3,
+.diag-sub {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+
+.diag-sub {
+  margin-top: 16px;
+}
+
+.diag-section dl {
+  display: grid;
+  grid-template-columns: minmax(110px, 30%) 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.diag-section dt {
+  color: var(--muted);
+}
+
+.diag-section dd {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.diag-body pre {
+  margin: 0;
+  max-height: 200px;
+  overflow: auto;
+  font-size: 12px;
+}
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 12px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.check input {
+  margin-top: 3px;
+}
+
+.check small {
+  display: block;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.muted.small {
+  margin-top: 6px;
+  font-size: 12.5px;
+}
+
+.badge[data-path='worker'] {
+  color: var(--accent);
+  border-color: currentColor;
+}
+
+/* ---- more devices than fit around you: a plain grid ---- */
+
+.field.crowded .radar,
+.field.crowded .me {
+  display: none;
+}
+
+.field.crowded .peers {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.field.crowded .peer {
+  position: static;
+  transform: none;
+}
+
+/* Tall dialogs (diagnostics) scroll inside the window instead of running off it. */
+.dialog {
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+}
+
+.diag-body {
+  max-height: 46vh;
+}
