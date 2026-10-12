@@ -26,6 +26,8 @@ helm lint "$CHART" --set ice.turn.urls[0]=turn:t.example.com --set ice.turn.exis
 helm lint "$CHART" --set ice.cloudflare.keyId=k --set ice.cloudflare.apiToken=t >/dev/null
 helm lint "$CHART" --set ice.cloudflare.existingSecret=cf >/dev/null
 helm lint "$CHART" --set server.networkRooms=false >/dev/null
+# Rancher installs every chart with a `global` block of its own (global.cattle.*).
+helm lint "$CHART" --set global.cattle.clusterId=c-abc12 --set global.systemDefaultRegistry= >/dev/null
 
 refused() {
   # $1: what it is; the rest: helm arguments that must not render.

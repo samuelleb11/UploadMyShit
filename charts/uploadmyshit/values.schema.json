@@ -3,6 +3,10 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "global": {
+      "description": "Values Helm shares with every chart, and Rancher fills in (global.cattle.*). Accepted, not read.",
+      "type": "object"
+    },
     "image": {
       "type": "object",
       "additionalProperties": false,
