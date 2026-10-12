@@ -21,6 +21,8 @@ pub enum ClientMsg {
         room: Option<String>,
         name: Option<String>,
         device: Option<DeviceInfo>,
+        /// The asset version the page's scripts came from (opaque here).
+        page: Option<String>,
     },
     /// WebRTC negotiation for one other device in the same room.
     Signal {
@@ -58,6 +60,7 @@ struct Frame {
     data: Option<Box<RawValue>>,
     sid: Option<String>,
     rsid: Option<String>,
+    page: Option<String>,
 }
 
 impl ClientMsg {
@@ -70,6 +73,7 @@ impl ClientMsg {
                 room: f.room,
                 name: f.name,
                 device: f.device,
+                page: f.page,
             },
             "signal" => ClientMsg::Signal {
                 to: f.to.clone().ok_or_else(|| missing("to"))?,
@@ -105,6 +109,10 @@ pub struct PeerInfo {
     pub id: String,
     pub name: String,
     pub device: DeviceInfo,
+    /// The version of the page that device runs: the others mark it outdated when it is not
+    /// the server's. Absent from pages too old to say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -226,6 +234,7 @@ mod tests {
             id: "a".into(),
             name: "Calm Otter".into(),
             device: DeviceInfo::default(),
+            page: None,
         };
         let json = ServerMsg::PeerJoined { peer: &peer }.to_json();
         assert_eq!(

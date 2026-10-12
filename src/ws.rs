@@ -153,13 +153,14 @@ async fn session(socket: WebSocket, state: Arc<AppState>, ip: IpAddr, admission:
         Ok(Some(t)) => t,
         _ => return,
     };
-    let (secret, room, name, device) = match ClientMsg::parse(&hello) {
+    let (secret, room, name, device, page) = match ClientMsg::parse(&hello) {
         Ok(ClientMsg::Hello {
             secret,
             room,
             name,
             device,
-        }) => (secret, room, name, device),
+            page,
+        }) => (secret, room, name, device, page),
         _ => return refuse(sink, "bad-hello", "the first message must be a hello").await,
     };
     if !valid_secret(&secret) {
@@ -195,6 +196,7 @@ async fn session(socket: WebSocket, state: Arc<AppState>, ip: IpAddr, admission:
             os: names::clean_device_field(&device.os),
             browser: names::clean_device_field(&device.browser),
         },
+        page: page.filter(|p| opaque_id(p)),
     };
 
     let (tx, rx) = mpsc::channel(OUTBOUND_QUEUE);

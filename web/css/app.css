@@ -939,3 +939,7 @@ body.dragging .peer .avatar {
 .diag-body {
   max-height: 46vh;
 }
+
+.peer.outdated .meta {
+  color: var(--warn);
+}

@@ -87,6 +87,10 @@ async fn devices_on_one_network_find_each_other_and_signal() {
     let b_id = wb["id"].as_str().unwrap().to_string();
     assert_eq!(wb["peers"][0]["id"], a_id.as_str());
     assert_eq!(wb["peers"][0]["name"], "Alpha");
+    assert!(
+        wb["peers"][0].get("page").is_none(),
+        "a page that does not say has no version"
+    );
 
     let joined = recv(&mut a).await;
     assert_eq!(joined["t"], "peer-joined");
@@ -111,6 +115,36 @@ async fn devices_on_one_network_find_each_other_and_signal() {
 
     b.close(None).await.unwrap();
     assert_eq!(recv(&mut a).await, json!({"t": "peer-left", "id": b_id}));
+}
+
+#[tokio::test]
+async fn devices_say_which_page_they_run() {
+    let addr = start(&[]).await;
+    let mut a = connect(addr).await;
+    send(
+        &mut a,
+        json!({"t": "hello", "secret": "secret-a-0123456789", "page": "abc123def456"}),
+    )
+    .await;
+    assert_eq!(recv(&mut a).await["t"], "welcome");
+    let (_b, wb) = hello(addr, "secret-b-0123456789", None, "B").await;
+    assert_eq!(wb["peers"][0]["page"], "abc123def456");
+    // Anything that is not a plain id is dropped rather than passed on.
+    let mut c = connect(addr).await;
+    send(
+        &mut c,
+        json!({"t": "hello", "secret": "secret-c-0123456789", "page": "<script>"}),
+    )
+    .await;
+    assert_eq!(recv(&mut c).await["t"], "welcome");
+    let (_d, wd) = hello(addr, "secret-d-0123456789", None, "D").await;
+    let pages: Vec<_> = wd["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.get("page").cloned())
+        .collect();
+    assert!(pages.contains(&Some(json!("abc123def456"))) && pages.contains(&None));
 }
 
 #[tokio::test]

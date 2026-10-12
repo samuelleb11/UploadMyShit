@@ -299,6 +299,7 @@ mod tests {
             id: id.into(),
             name: format!("Name {id}"),
             device: DeviceInfo::default(),
+            page: None,
         }
     }
 

@@ -80,6 +80,8 @@ let room = roomFromUrl();
 let me = { id: null, name: settings.name };
 let ice = { iceServers: [] };
 let relayAvailable = false;
+/** The page version the server serves now: devices running another one are outdated. */
+let serverAssets = null;
 let roomInfo = null;
 let serverVersion = null;
 let iceWaiters = [];
@@ -96,6 +98,7 @@ const signaling = new Signaling(() => ({
   room,
   name: settings.name || undefined,
   device,
+  page: PAGE_VERSION ?? undefined,
 }));
 
 signaling.on('state', (state) => {
@@ -111,6 +114,7 @@ signaling.on('welcome', (m) => {
   relayAvailable = Boolean(m.relay);
   roomInfo = m.room;
   serverVersion = m.version;
+  serverAssets = m.assets ?? null;
   if (PAGE_VERSION && m.assets && m.assets !== PAGE_VERSION) updateReady(m.assets);
   if (!settings.name) {
     settings.name = m.name;
@@ -287,6 +291,11 @@ function renderPeer(id) {
   const { info, el: btn } = p;
   btn.querySelector('.name').textContent = info.name;
   btn.querySelector('.meta').textContent = [info.device.os, info.device.browser].filter(Boolean).join(' · ');
+  // A device on an older page may lack fixes this one has: say so where it shows.
+  const outdated = Boolean(serverAssets) && info.page !== serverAssets;
+  btn.classList.toggle('outdated', outdated);
+  btn.title = outdated ? 'This device runs an older version of the page. Reload it there.' : '';
+  if (outdated) btn.querySelector('.meta').textContent += ' · outdated, reload it';
   btn.querySelector('.avatar use').setAttribute('href', `#i-${ICON_FOR[info.device.kind] ?? 'laptop'}`);
   btn.setAttribute('aria-label', `Send to ${info.name}`);
   const s = sessions.get(id);
