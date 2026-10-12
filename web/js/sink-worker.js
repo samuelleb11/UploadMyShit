@@ -43,10 +43,12 @@ self.onmessage = (e) => {
   }
 };
 
-function fail(err) {
+/** Ends the job with an error that names the file it happened on, when there is one. */
+function fail(err, path) {
   if (!job || job.failed) return;
   job.failed = true;
-  post({ op: 'error', message: `${err?.name ?? 'Error'}: ${err?.message ?? err}` });
+  const where = path ? `${path}: ` : '';
+  post({ op: 'error', message: `${where}${err?.name ?? 'Error'}: ${err?.message ?? err}` });
 }
 
 async function probe() {
@@ -284,7 +286,7 @@ async function drain(f, fi) {
     }
     if (f.written === f.size && !f.done) await complete(f, fi);
   } catch (err) {
-    fail(err);
+    fail(err, f.path);
   } finally {
     f.busy = false;
   }
@@ -308,7 +310,7 @@ function flushWritten() {
 /** Closes a finished file and tells the page, which can use it right away. */
 function complete(f, fi) {
   f.done = true;
-  f.completed = closeAndReport(f, fi).catch(fail);
+  f.completed = closeAndReport(f, fi).catch((err) => fail(err, f.path));
   return f.completed;
 }
 

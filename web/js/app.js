@@ -537,13 +537,19 @@ for (const input of [$('#pick-files'), $('#pick-folder')]) {
     const picked = entriesFromInput(input.files);
     input.value = '';
     $('#send-dialog').close();
-    if (sendTarget) sendTo(sendTarget, picked.files, picked.dirs);
+    if (sendTarget) sendTo(sendTarget, picked.files, picked.dirs, picked.skipped);
   });
 }
 
-function sendTo(peerId, files, dirs = []) {
+/** skipped: OS clutter left out of what was picked (files.js), named in a note. */
+function sendTo(peerId, files, dirs = [], skipped = []) {
+  if (skipped.length) {
+    const names = [...new Set(skipped.map((p) => p.replace(/\/$/, '').split('/').pop()))];
+    const more = names.length > 3 ? ` and ${names.length - 3} more` : '';
+    toast(`Left out system files: ${names.slice(0, 3).join(', ')}${more}.`);
+  }
   if (!files.length && !dirs.length) {
-    toast('Nothing to send: the folder is empty.');
+    toast(skipped.length ? 'Nothing left to send.' : 'Nothing to send: the folder is empty.');
     return null;
   }
   return session(peerId).send(files, dirs);
@@ -592,7 +598,7 @@ addEventListener('drop', (e) => {
   }
   // Taken synchronously: the browser empties the drop data once this handler returns.
   entriesFromDrop(e.dataTransfer)
-    .then(({ files, dirs }) => sendTo(target, files, dirs))
+    .then(({ files, dirs, skipped }) => sendTo(target, files, dirs, skipped))
     .catch((err) => toast(`Could not read what was dropped: ${err.message}`));
 });
 

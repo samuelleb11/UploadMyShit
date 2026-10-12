@@ -15,12 +15,14 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
+import { safePath } from '../../web/js/files.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -384,21 +386,76 @@ try {
   };
   const routeOf = () => a.evaluate((id) => window.__ums.sessions.get(id)?.route(), idB);
 
+  /** An OS-level drag of a path on disk, dropped at x, y: what a person dragging from a file manager does. */
+  const dragFromDisk = async (ctx, page, path, x, y) => {
+    const cdp = await ctx.newCDPSession(page);
+    for (const type of ['dragEnter', 'dragOver', 'drop']) {
+      await cdp.send('Input.dispatchDragEvent', { type, x, y, data: { items: [], files: [path], dragOperationsMask: 1 } });
+    }
+    await cdp.detach();
+  };
+
+  /**
+   * Chrome's own verdict on names in a real folder on disk: the paths whose file or folder
+   * names it refuses ("Name is not allowed"). That check comes before any permission check,
+   * so the read access a dropped folder carries is enough to ask it.
+   */
+  const chromeRefuses = async (ctx, page, paths) => {
+    const probe = realpathSync(mkdtempSync(join(tmpdir(), 'ums-probe-')));
+    try {
+      await page.evaluate(() => {
+        const take = (e) => { e.preventDefault(); e.stopImmediatePropagation(); };
+        window.addEventListener('dragenter', take, true);
+        window.addEventListener('dragover', take, true);
+        window.__probe = new Promise((res) => window.addEventListener('drop', async (e) => {
+          take(e);
+          window.removeEventListener('dragenter', take, true);
+          window.removeEventListener('dragover', take, true);
+          res(await e.dataTransfer.items[0].getAsFileSystemHandle());
+        }, { once: true, capture: true }));
+      });
+      await dragFromDisk(ctx, page, probe, 300, 300);
+      return await page.evaluate(async (paths) => {
+        const dir = await window.__probe;
+        const out = [];
+        for (const path of paths) {
+          const parts = path.split('/');
+          for (const [i, name] of parts.entries()) {
+            try {
+              await (i < parts.length - 1 ? dir.getDirectoryHandle(name) : dir.getFileHandle(name));
+            } catch (e) {
+              if (e.name !== 'NotFoundError') out.push(`${path} (${name}): ${e.name} ${e.message}`);
+            }
+          }
+        }
+        return out;
+      }, paths);
+    } finally {
+      rmSync(probe, { recursive: true, force: true });
+    }
+  };
+
   await step('names a folder refuses arrive cleaned, and the transfer completes', async () => {
     await reconnect();
     await b.evaluate(async () => {
       const dest = await (await navigator.storage.getDirectory()).getDirectoryHandle('dest-names', { create: true });
       window.__ums.setAutoAccept(() => ({ mode: 'dir', dir: dest }));
     });
-    // Names Chrome refuses in a folder the user picked ("Name is not allowed"), and what they become.
+    // As an older sender would send them, uncleaned: what the receiver writes instead of each
+    // name Chrome refuses in a real folder, and the names it leaves alone.
     const names = {
-      "Alice Cooper - School's Out/._guitar.ogg": "Alice Cooper - School's Out/__guitar.ogg",
-      "Alice Cooper - School's Out/song.ini~": "Alice Cooper - School's Out/song.ini_",
-      "Alice Cooper - School's Out/.hidden": "Alice Cooper - School's Out/_hidden",
-      "Alice Cooper - School's Out/~$lock.docx": "Alice Cooper - School's Out/_$lock.docx",
+      "Alice Cooper - School's Out/Visit us.url": "Alice Cooper - School's Out/Visit us.url_",
       "Alice Cooper - School's Out/shortcut.lnk": "Alice Cooper - School's Out/shortcut.lnk_",
       "Alice Cooper - School's Out/desktop.ini": "Alice Cooper - School's Out/_desktop.ini",
       "Alice Cooper - School's Out/soft\u00adhyphen.txt": "Alice Cooper - School's Out/soft_hyphen.txt",
+      "Alice Cooper - School's Out/a:b.txt": "Alice Cooper - School's Out/a_b.txt",
+      "Alice Cooper - School's Out/trail. ": "Alice Cooper - School's Out/trail",
+      "Alice Cooper - School's Out/._guitar.ogg": "Alice Cooper - School's Out/._guitar.ogg",
+      "Alice Cooper - School's Out/song.ini~": "Alice Cooper - School's Out/song.ini_",
+      "Alice Cooper - School's Out/~notes.txt": "Alice Cooper - School's Out/_notes.txt",
+      "Alice Cooper - School's Out/..double": "Alice Cooper - School's Out/._double",
+      "Alice Cooper - School's Out/a~b.txt": "Alice Cooper - School's Out/a~b.txt",
+      "Alice Cooper - School's Out/.hidden": "Alice Cooper - School's Out/.hidden",
       "Alice Cooper - School's Out/notes.mid": "Alice Cooper - School's Out/notes.mid",
     };
     const r = await a.evaluate(async ({ to, names }) => {
@@ -410,7 +467,33 @@ try {
     assert.equal(r.state, 'done', r.error);
     const tree = await b.evaluate(readTree, 'dest-names');
     for (const want of Object.values(names)) assert.ok(want in tree.files, `${want} arrived (got ${Object.keys(tree.files).join(', ')})`);
+    assert.deepEqual(await chromeRefuses(browsers[1], b, Object.keys(tree.files)), [], 'Chrome refuses none of them in a real folder');
     await b.evaluate(dropTree, 'dest-names');
+  });
+
+  await step('every name the cleaner makes is one Chrome writes in a real folder', async () => {
+    // Names Chrome was measured refusing or accepting, then hostile pieces put together at
+    // random (seeded, so a failure can be replayed).
+    const measured = ['~a', 'a~', '~', 'a~b', '.~a', '..a', '...a', '. a', '.a.', '.a ', 'a.', 'a ', ' a', 'a..b',
+      'a\tb', 'a"b', 'a*b', 'a<b', 'a>b', 'a?b', 'a|b', 'a:b', 'soft\u00adhyphen', 'zero\u200bwidth', 'zwj\u200dx',
+      'rtl\u202ex', 'bom\ufeffx', 'ls\u2028x', 'x\u00a0', '\u3000x', 'x\u2003', 'e\u0301', '❤️', '👨\u200d👩\u200d👧',
+      'x\ufdd0', 'x\uffff', 'x\u{1fffe}', 'con', 'CON.txt', 'con.txt.bak', 'com1', 'com0', 'com¹', 'lpt9', 'clock$',
+      'conin$', 'conout$', 'nul.tar.gz', 'desktop.ini', 'Thumbs.db', 'Icon\r', '~$lock.docx', '.~lock.a.odt#', '.lnk',
+      'f.LNK', 'f.scf', 'f.url', 'f.{x}', 'f.{x}y}', 'f.{a.b}', 'f.local', 'a.lnk.txt', 'x'.repeat(300)];
+    const pieces = ['.', '..', '~', ' ', '\u00a0', '\u3000', '\t', '\r', ':', '"', '*', '?', '<', '>', '|', '\\',
+      '\u200b', '\u200d', '\u00ad', '\ufeff', '\u202e', '\ufdd0', '\uffff', '\ud800', '影', 'é', 'e\u0301', '🎸',
+      '$', '{', '}', 'a', 'con', 'COM1', 'clock$', '.lnk', '.URL', '.scf', '.{x}', 'desktop.ini', '-', 'x'.repeat(120)];
+    let seed = 0xc0ffee;
+    const rand = (n) => {
+      seed = (seed * 1103515245 + 12345) >>> 0;
+      return (seed >>> 8) % n;
+    };
+    const raw = [...measured];
+    for (let i = 0; i < 2000; i++) raw.push(Array.from({ length: 1 + rand(6) }, () => pieces[rand(pieces.length)]).join(''));
+    const cleaned = [...new Set(raw.map(safePath))];
+    const enc = new TextEncoder();
+    for (const p of cleaned) for (const seg of p.split('/')) assert.ok(enc.encode(seg).length <= 255, `${seg}: too long`);
+    assert.deepEqual(await chromeRefuses(browsers[1], b, cleaned), [], 'Chrome refuses none of the cleaned names');
   });
 
   await step('signals left over from a closed connection do not revive it', async () => {
@@ -583,6 +666,92 @@ try {
     await a.waitForFunction(() => window.__ums.peers().length === 1, null, { timeout: 10_000 });
     await b.waitForFunction(() => window.__ums.peers().length === 1, null, { timeout: 10_000 });
     assert.match(await b.textContent('#room-label'), /^Room [a-z2-9]{10}$/);
+  });
+
+  await step('a real folder dropped from disk: clutter left out, bytes intact, every name one Chrome writes in a real folder', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ums-real-')));
+    const src = join(root, 'src', 'Album');
+    // Kept as they are, or cleaned (Chrome refuses the original in a real folder).
+    const keep = {
+      '01 - Intro.ogg': '01 - Intro.ogg',
+      '02 - Song.ogg': '02 - Song.ogg',
+      'notes.chart': 'notes.chart',
+      'song.ini': 'song.ini',
+      '.gitignore': '.gitignore',
+      '~notes.txt': '_notes.txt',
+      'song.ini~': 'song.ini_',
+      '..double.txt': '._double.txt',
+      '.~tilde': '._tilde',
+      'a~b.txt': 'a~b.txt',
+      'family 👨\u200d👩\u200d👧.jpg': 'family 👨_👩_👧.jpg',
+      'Folder~/inner.txt': 'Folder_/inner.txt',
+      'emoji 🎸.ogg': 'emoji 🎸.ogg',
+      'Sub Folder/inner.ogg': 'Sub Folder/inner.ogg',
+      'Visit us.url': 'Visit us.url_',
+      'shortcut.lnk': 'shortcut.lnk_',
+      'a:b.txt': 'a_b.txt',
+      'trail. ': 'trail',
+      'con.txt': '_con.txt',
+      'zero\u200bwidth.txt': 'zero_width.txt',
+      [`${'影'.repeat(80)}.ogg`]: `${'影'.repeat(78)}.ogg`,
+    };
+    // What Windows, macOS and Linux leave in folders; none of it may be sent.
+    const junk = ['Thumbs.db', 'desktop.ini', '.DS_Store', '._01 - Intro.ogg', 'Icon\r', '~$lock.docx', '.directory',
+      '__MACOSX/x.jpg', '$RECYCLE.BIN/y.jpg', '.Trash-1000/z.jpg', '.Spotlight-V100/store.db'];
+    const sums = {};
+    Object.keys(keep).forEach((name, i) => {
+      const bytes = randomBytes(name.endsWith('.ogg') ? 2e6 + i * 77777 : 1000 + i);
+      mkdirSync(dirname(join(src, name)), { recursive: true });
+      writeFileSync(join(src, name), bytes);
+      sums[keep[name]] = createHash('sha256').update(bytes).digest('hex');
+    });
+    for (const name of junk) {
+      mkdirSync(dirname(join(src, name)), { recursive: true });
+      writeFileSync(join(src, name), 'junk');
+    }
+    try {
+      await reconnect();
+      await b.evaluate(async () => {
+        const dest = await (await navigator.storage.getDirectory()).getDirectoryHandle('dest-real', { create: true });
+        window.__real = null;
+        window.__ums.setAutoAccept((t) => {
+          window.__real = t;
+          return { mode: 'dir', dir: dest };
+        });
+      });
+      // Dropped from disk onto B in A's page: the app's own drop handling collects it.
+      const peer = a.locator(`.peer[data-id="${idB}"]`);
+      await peer.waitFor({ timeout: 15_000 });
+      const box = await peer.boundingBox();
+      await dragFromDisk(browsers[0], a, src, box.x + box.width / 2, box.y + box.height / 2);
+      await b.waitForFunction(() => window.__real?.terminal, null, { timeout: 120_000 });
+      const got = await b.evaluate(() => ({ state: window.__real.state, error: window.__real.error, count: window.__real.count }));
+      assert.equal(got.state, 'done', got.error);
+      assert.equal(got.count, Object.keys(keep).length, 'the sender left the clutter out');
+      // Exactly the expected files, byte for byte.
+      const arrived = await b.evaluate(async () => {
+        const out = {};
+        const walk = async (dir, pre) => {
+          for await (const [n, h] of dir.entries()) {
+            if (h.kind === 'directory') await walk(h, `${pre}${n}/`);
+            else {
+              const d = await crypto.subtle.digest('SHA-256', await (await h.getFile()).arrayBuffer());
+              out[`${pre}${n}`] = [...new Uint8Array(d)].map((x) => x.toString(16).padStart(2, '0')).join('');
+            }
+          }
+        };
+        await walk(await (await (await navigator.storage.getDirectory()).getDirectoryHandle('dest-real')).getDirectoryHandle('Album'), '');
+        return out;
+      });
+      assert.deepEqual(Object.keys(arrived).sort(), Object.keys(sums).sort(), 'the expected names');
+      for (const [name, sum] of Object.entries(sums)) assert.equal(arrived[name], sum, `content of ${name}`);
+      // Chrome's own verdict, from a real folder on disk, on every name that arrived.
+      const refused = await chromeRefuses(browsers[1], b, Object.keys(arrived).map((p) => `Album/${p}`));
+      assert.deepEqual(refused, [], 'Chrome refuses none of the names that arrived');
+      await b.evaluate(async () => (await navigator.storage.getDirectory()).removeEntry('dest-real', { recursive: true }));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   await step('a tab left open across a deploy reloads itself, once', async () => {
