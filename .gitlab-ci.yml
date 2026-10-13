@@ -16,7 +16,7 @@
 #                         registry login, as the shared docker templates expect
 #   UPLOADMYSHIT_VALUES   FILE variable: the chart values for this cluster -- ingress host and
 #                         class, TLS issuer, image pull secret, and the TURN configuration
-#                         (or the name of a Secret holding it). See README.md.
+#                         (or the name of a Secret holding it). See docs/deployment.md.
 #   KUBE_CONTEXT          optional; the kube context to deploy with, when the cluster
 #                         credentials offer more than one
 

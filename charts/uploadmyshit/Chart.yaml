@@ -7,7 +7,7 @@ type: application
 # The chart's own version: bump the minor when a template changes. A published chart keeps
 # this major.minor, takes its pipeline's number as the patch, and names the commit it was
 # built for as appVersion (scripts/package-chart.sh).
-version: 0.2.0
+version: 0.3.0
 appVersion: "0.1.0"
 home: https://github.com/samuelleb11/UploadMyShit
 sources:

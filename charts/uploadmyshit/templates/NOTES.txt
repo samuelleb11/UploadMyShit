@@ -25,6 +25,12 @@ server sees real visitor addresses. Open the page from two different networks (a
 Wi-Fi, and a computer): they must NOT see each other. If they do, the ingress controller is
 hiding client addresses (see server.clientIpHeader in values.yaml); fix that, or set
 server.networkRooms=false so only private rooms exist.
+{{- if ne (lower (.Values.server.clientIpHeader | default "")) "cf-connecting-ip" }}
+
+Behind Cloudflare (proxied DNS or a Cloudflare Tunnel)? Set
+server.clientIpHeader=cf-connecting-ip. If you don't, the server notices, keeps visitors
+out of network rooms and logs "visitors come through Cloudflare".
+{{- end }}
 {{- end }}
 {{- if .Values.relay.url }}
 
